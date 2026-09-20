@@ -103,6 +103,17 @@ services:
       # declared below, because the 64 MiB container default makes the renderer crash.
       - KCEF_ENABLED=${KCEF_ENABLED:-true}
       - MAX_SOURCES_IN_PARALLEL=${MAX_SOURCES_IN_PARALLEL:-4}
+      # Only the embedded Chromium (WebView) honours these; the JVM ignores proxy variables.
+      # The WebView must egress through WARP to receive a solvable challenge instead of this
+      # host's hard block page. Internal hosts and Backblaze stay direct.
+      - HTTP_PROXY=${SUWAYOMI_HTTP_PROXY:-http://warp-http-proxy:8118}
+      - HTTPS_PROXY=${SUWAYOMI_HTTP_PROXY:-http://warp-http-proxy:8118}
+      - ALL_PROXY=${SUWAYOMI_HTTP_PROXY:-http://warp-http-proxy:8118}
+      - http_proxy=${SUWAYOMI_HTTP_PROXY:-http://warp-http-proxy:8118}
+      - https_proxy=${SUWAYOMI_HTTP_PROXY:-http://warp-http-proxy:8118}
+      - all_proxy=${SUWAYOMI_HTTP_PROXY:-http://warp-http-proxy:8118}
+      - NO_PROXY=${SUWAYOMI_NO_PROXY:-localhost,127.0.0.1,::1,trawl,suwayomi-rclone,warp-http-proxy,warp-bridge,backblazeb2.com}
+      - no_proxy=${SUWAYOMI_NO_PROXY:-localhost,127.0.0.1,::1,trawl,suwayomi-rclone,warp-http-proxy,warp-bridge,backblazeb2.com}
       - FLARESOLVERR_ENABLED=${FLARESOLVERR_ENABLED:-true}
       - FLARESOLVERR_URL=http://trawl:8191
     volumes:
@@ -136,6 +147,16 @@ services:
       - SESSION_CACHE_DRIVER=memory
       # Tier 3 proxy: the host WARP SOCKS proxy exposed by warp-bridge.
       - PROXY_URL=${TRAWL_PROXY_URL:-socks5://host.docker.internal:40001}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # HTTP proxy in front of the host WARP SOCKS proxy: the embedded Chromium only understands an
+  # HTTP proxy, and the WebView has to egress through WARP to see a challenge rather than a block.
+  warp-http-proxy:
+    image: gogost/gost:3
+    container_name: warp-http-proxy
+    restart: unless-stopped
+    command: -L http://:8118 -F socks5://host.docker.internal:${WARP_PROXY_PORT:-40001}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

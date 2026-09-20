@@ -261,6 +261,26 @@ docker compose exec trawl sh -lc \
 
 Rollback: set `FLARESOLVERR_URL=http://flaresolverr:8191` and re-add the previous Byparr service.
 
+### WebView egress
+
+The embedded Chromium is the only client in the Suwayomi container that honours proxy
+environment variables — the JVM ignores them — so the WebView can be sent through WARP without
+affecting the app's own HTTP client:
+
+```sh
+docker compose exec suwayomi sh -lc 'env | grep -i proxy'
+docker compose exec suwayomi sh -lc \
+  'curl -s -x http://warp-http-proxy:8118 https://api.ipify.org; echo'   # WARP address
+```
+
+`NO_PROXY` must keep internal service names and `backblazeb2.com` direct: rclone runs inside the
+same container and does honour these variables, so proxying Backblaze would add a dependency on
+WARP to archive verification. Set `SUWAYOMI_HTTP_PROXY=` (empty) in `.env` to send the WebView out
+directly again.
+
+Note that this only changes where the WebView connects from. The app's own source requests use its
+Java HTTP client and therefore still depend on the challenge solver, not on the WebView's egress.
+
 ### Bundled WebUI
 
 The `Custom` flavor serves the copy under the data root and never manages it, so the image
