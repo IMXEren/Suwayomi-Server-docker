@@ -36,7 +36,10 @@ services:
       - --vfs-cache-max-age=${RCLONE_VFS_CACHE_MAX_AGE:-168h}
       - --vfs-write-back=${RCLONE_VFS_WRITE_BACK:-10s}
       - --dir-cache-time=${RCLONE_DIR_CACHE_TIME:-10m}
-      - --poll-interval=${RCLONE_POLL_INTERVAL:-1m}
+      # /data is already a bind mount of the shared host path, so rclone must be told it is
+      # allowed to mount over a non-empty mount point. Without this the sidecar crash-loops
+      # with "directory already mounted, use --allow-non-empty to mount anyway: /data".
+      - --allow-non-empty
       - --allow-other
       - --uid=1000
       - --gid=1000
