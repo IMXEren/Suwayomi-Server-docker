@@ -1,3 +1,9 @@
+## [0.1.0-dev.4](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.3...v0.1.0-dev.4) (2026-09-20)
+
+### Bug Fixes
+
+* **deploy:** keep the served WebUI in sync with the bundled one ([66aca1b](https://github.com/IMXEren/Suwayomi-Server-docker/commit/66aca1b5e17571e849fbd8806f3f355ac83dc864))
+
 ## [0.1.0-dev.3](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.2...v0.1.0-dev.3) (2026-09-20)
 
 ### Features
