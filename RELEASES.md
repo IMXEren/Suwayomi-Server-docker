@@ -1,3 +1,9 @@
+## [0.1.0-dev.7](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.6...v0.1.0-dev.7) (2026-09-20)
+
+### Features
+
+* **deploy:** send the WebView through WARP ([3d86b22](https://github.com/IMXEren/Suwayomi-Server-docker/commit/3d86b22c2f14a3a7a96043cf2f882a655dcd7621))
+
 ## [0.1.0-dev.6](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.5...v0.1.0-dev.6) (2026-09-20)
 
 ### Features
