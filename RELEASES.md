@@ -1,3 +1,9 @@
+## [0.1.0-dev.8](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.7...v0.1.0-dev.8) (2026-09-20)
+
+### Bug Fixes
+
+* **deploy:** inject ISP proxy credentials for the WebView ([694e432](https://github.com/IMXEren/Suwayomi-Server-docker/commit/694e432ad07183d60dc031933d353208342158d4))
+
 ## [0.1.0-dev.7](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.6...v0.1.0-dev.7) (2026-09-20)
 
 ### Features
