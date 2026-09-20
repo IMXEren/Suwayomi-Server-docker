@@ -1,3 +1,9 @@
+## [0.1.0-dev.5](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.4...v0.1.0-dev.5) (2026-09-20)
+
+### Features
+
+* **deploy:** enable the embedded WebView ([80341e0](https://github.com/IMXEren/Suwayomi-Server-docker/commit/80341e048151a0db72aac7ebea0ee099b9e7cfda))
+
 ## [0.1.0-dev.4](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.3...v0.1.0-dev.4) (2026-09-20)
 
 ### Bug Fixes
