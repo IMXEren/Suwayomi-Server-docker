@@ -264,19 +264,25 @@ Rollback: set `FLARESOLVERR_URL=http://flaresolverr:8191` and re-add the previou
 ### WebView egress
 
 The embedded Chromium is the only client in the Suwayomi container that honours proxy
-environment variables — the JVM ignores them — so the WebView can be sent through WARP without
-affecting the app's own HTTP client:
+environment variables — the JVM ignores them — so the WebView can be sent through a different
+egress without affecting the app's own HTTP client.
+
+Chromium **cannot send proxy credentials**, so the container points at the local `http-proxy`
+service rather than directly at an authenticated upstream; gost adds the credentials when it
+connects to the upstream. Without that hop an authenticated proxy leaves the WebView blank:
+Chromium reaches the proxy, gets `407`, and never renders the page.
 
 ```sh
 docker compose exec suwayomi sh -lc 'env | grep -i proxy'
-docker compose exec suwayomi sh -lc \
-  'curl -s -x http://warp-http-proxy:8118 https://api.ipify.org; echo'   # WARP address
+docker compose exec suwayomi sh -lc 'curl -s https://api.ipify.org; echo'   # the upstream address
+docker compose exec http-proxy sh -lc 'env | grep UPSTREAM'                 # not the default WARP
 ```
 
 `NO_PROXY` must keep internal service names and `backblazeb2.com` direct: rclone runs inside the
-same container and does honour these variables, so proxying Backblaze would add a dependency on
-WARP to archive verification. Set `SUWAYOMI_HTTP_PROXY=` (empty) in `.env` to send the WebView out
-directly again.
+same container and does honour these variables, so proxying Backblaze would make archive
+verification depend on the proxy. Set `SUWAYOMI_HTTP_PROXY=http://http-proxy:8118` and
+`WEBVIEW_PROXY_UPSTREAM=` empty to fall back to WARP, or `SUWAYOMI_HTTP_PROXY=` (empty) to send the
+WebView out directly again.
 
 Note that this only changes where the WebView connects from. The app's own source requests use its
 Java HTTP client and therefore still depend on the challenge solver, not on the WebView's egress.
