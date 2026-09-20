@@ -1,3 +1,14 @@
+## [0.1.0-dev.3](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.2...v0.1.0-dev.3) (2026-09-20)
+
+### Features
+
+* **deploy:** pin the bundled WebUI and headless runtime in Compose ([383773f](https://github.com/IMXEren/Suwayomi-Server-docker/commit/383773f4e0f8b007b543c9bb7d35cd67da0b9478))
+* **deploy:** run FlareSolverr by default and enable it in the app ([c3b271b](https://github.com/IMXEren/Suwayomi-Server-docker/commit/c3b271b4e848eadefbf5150570abe84a02fc9b8f))
+
+### Bug Fixes
+
+* **deploy:** allow the rclone sidecar to mount over the bind-mounted path ([10eb9dd](https://github.com/IMXEren/Suwayomi-Server-docker/commit/10eb9ddfa4c741dd5042f495b4445e0c0d887610))
+
 ## [0.1.0-dev.2](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.1...v0.1.0-dev.2) (2026-09-20)
 
 ### Bug Fixes
