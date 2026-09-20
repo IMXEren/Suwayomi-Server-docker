@@ -24,9 +24,11 @@ jobs:
 
       - name: Resolve input JAR
         id: input
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          json="$(curl -fsSL 'https://api.github.com/repos/IMXEren/Suwayomi-Server/releases?per_page=20')"
+          json="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H 'Accept: application/vnd.github+json' 'https://api.github.com/repos/IMXEren/Suwayomi-Server/releases?per_page=20')"
           url="$(echo "$json" | jq -r '[.[] | .assets[] | select(.name | endswith(".jar"))][0].browser_download_url')"
           tag="$(echo "$json" | jq -r '[.[] | select(any(.assets[]; .name | endswith(".jar")))][0].tag_name')"
           if [ -z "$url" ] || [ "$url" = "null" ]; then
