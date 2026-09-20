@@ -73,6 +73,8 @@ services:
       rclone:
         condition: service_healthy
         restart: true
+      flaresolverr:
+        condition: service_started
     environment:
       - TZ=${TZ:-Etc/UTC}
       # Archive wiring. The mounted B2 view is /archive, never the legacy downloads dir
@@ -100,7 +102,7 @@ services:
       # Headless server: the embedded Chromium (KCEF) is not needed and costs a lot of RAM.
       - KCEF_ENABLED=${KCEF_ENABLED:-false}
       - MAX_SOURCES_IN_PARALLEL=${MAX_SOURCES_IN_PARALLEL:-4}
-      - FLARESOLVERR_ENABLED=${FLARESOLVERR_ENABLED:-false}
+      - FLARESOLVERR_ENABLED=${FLARESOLVERR_ENABLED:-true}
       - FLARESOLVERR_URL=http://flaresolverr:8191
     volumes:
       # Local data: H2 database, downloads and the revision staging root.
@@ -114,13 +116,12 @@ services:
       - rclone.conf
       - auth_password
 
-  # Optional Cloudflare challenge solver. Enable with `docker compose --profile flaresolverr up -d`
-  # and set FLARESOLVERR_ENABLED=true in .env.
+  # Cloudflare challenge solver. Started by default because it is enabled in the app by
+  # default (FLARESOLVERR_ENABLED=true). Set FLARESOLVERR_ENABLED=false in .env to disable
+  # the integration, or stop just this service with `docker compose stop flaresolverr`.
   flaresolverr:
     image: ghcr.io/thephaseless/byparr:latest
     container_name: flaresolverr
-    profiles:
-      - flaresolverr
     environment:
       - TZ=${TZ:-Etc/UTC}
     restart: unless-stopped
