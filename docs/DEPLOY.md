@@ -232,6 +232,23 @@ docker compose logs suwayomi | grep "Updating bundled WebUI"
 This is what makes an image upgrade actually change the served WebUI, and it is also the
 revision the app reports as its WebUI version.
 
+### KCEF / WebView
+
+The image bundles KCEF and Xvfb, so the WebView only needs the setting turned on. It requires a
+raised `shm_size` (Chromium allocates from `/dev/shm` and Docker's 64 MiB default makes the
+renderer crash) and roughly 0.5 GiB of spare RAM.
+
+```sh
+docker compose exec suwayomi sh -lc \
+  'grep kcefEnabled /home/suwayomi/.local/share/Tachidesk/server.conf'
+docker compose logs suwayomi | grep -iE 'xvfb|LD_PRELOAD'
+docker stats --no-stream suwayomi
+```
+
+Expect `server.kcefEnabled = true`, a `xvfb-run` launch line, and a working WebView. On a host
+without swap, watch the memory headroom: Suwayomi plus a WebView and FlareSolverr's own Chromium
+can exceed a 4 GiB instance.
+
 ### FlareSolverr
 
 FlareSolverr (Byparr) runs by default and is enabled in the app. A root request answers

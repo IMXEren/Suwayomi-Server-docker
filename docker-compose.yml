@@ -99,8 +99,9 @@ services:
       - WEB_UI_FLAVOR=${WEB_UI_FLAVOR:-Custom}
       - WEB_UI_CHANNEL=${WEB_UI_CHANNEL:-BUNDLED}
       - WEB_UI_UPDATE_INTERVAL=${WEB_UI_UPDATE_INTERVAL:-0}
-      # Headless server: the embedded Chromium (KCEF) is not needed and costs a lot of RAM.
-      - KCEF_ENABLED=${KCEF_ENABLED:-false}
+      # The embedded Chromium (KCEF) backs the in-app WebView. It needs the raised shm_size
+      # declared below, because the 64 MiB container default makes the renderer crash.
+      - KCEF_ENABLED=${KCEF_ENABLED:-true}
       - MAX_SOURCES_IN_PARALLEL=${MAX_SOURCES_IN_PARALLEL:-4}
       - FLARESOLVERR_ENABLED=${FLARESOLVERR_ENABLED:-true}
       - FLARESOLVERR_URL=http://flaresolverr:8191
@@ -112,6 +113,8 @@ services:
     # Reachable only through the host reverse proxy / tunnel, never directly.
     ports:
       - "127.0.0.1:4567:4567"
+    # Chromium allocates from /dev/shm; Docker's 64 MiB default is not enough for KCEF.
+    shm_size: ${SUWAYOMI_SHM_SIZE:-512m}
     secrets:
       - rclone.conf
       - auth_password
