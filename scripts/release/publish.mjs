@@ -86,7 +86,7 @@ const isPrerelease = channel !== "";
 const sourceBranch = process.env.SUWAYOMI_SOURCE_BRANCH || (isPrerelease ? "dev" : "main");
 
 const owner = (process.env.GITHUB_REPOSITORY_OWNER || "IMXEren").toLowerCase();
-const image = process.env.IMAGE_NAME || `ghcr.io/${owner}/suwayomi-server-docker`;
+const image = process.env.IMAGE_NAME || `ghcr.io/${owner}/suwayomi-server`;
 
 const release = await pickJarRelease(isPrerelease);
 const jbrTag = await detectJbrTag(release.url).catch((err) => {

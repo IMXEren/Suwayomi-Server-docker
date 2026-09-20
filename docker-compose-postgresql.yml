@@ -1,7 +1,7 @@
 ---
 services:
   suwayomi:
-    image: ${SUWAYOMI_IMAGE:-ghcr.io/imxeren/suwayomi-server-docker:dev}
+    image: ${SUWAYOMI_IMAGE:-ghcr.io/imxeren/suwayomi-server:dev}
     # user: 1000:1000
     environment:
       - TZ=${TZ:-Etc/UTC} # Add a TZ variable to .env to change it

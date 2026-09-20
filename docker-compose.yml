@@ -63,7 +63,7 @@ services:
       start_period: 30s
 
   suwayomi:
-    image: ${SUWAYOMI_IMAGE:-ghcr.io/imxeren/suwayomi-server-docker:stable}
+    image: ${SUWAYOMI_IMAGE:-ghcr.io/imxeren/suwayomi-server:stable}
     container_name: suwayomi
     restart: unless-stopped
     depends_on:

@@ -47,7 +47,7 @@ The old host rclone service and the systemd compose wrapper are retired.
 - Docker Engine with Compose v2.17+ (needed for `depends_on: { condition: service_healthy, restart: true }`).
 - `/dev/fuse` present on the host (the rclone sidecar needs it).
 - The compose project lives in `/opt/suwayomi` and the image comes from this repository's
-  release workflow (`ghcr.io/imxeren/suwayomi-server-docker`).
+  release workflow (`ghcr.io/imxeren/suwayomi-server`).
 
 ## One-time host preparation
 
