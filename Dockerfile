@@ -1,3 +1,5 @@
+FROM rclone/rclone:1.75.1 AS rclone
+
 FROM eclipse-temurin:25.0.3_9-jdk-noble AS build
 
 ARG TACHIDESK_ABORT_HANDLER_DOWNLOAD_URL
@@ -29,6 +31,14 @@ RUN apt-get update && \
     /usr/bin/p11-kit extract --format=java-cacerts --filter=certificates --overwrite --purpose server-auth $JAVA_HOME/lib/security/cacerts && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# rclone CLI: required inside the app image so archival durability verification and
+# signed-link generation (`rclone lsjson` / `rclone link`) run against the remote
+# directly instead of through the FUSE mount served by the compose sidecar. Copying
+# from the pinned official multi-platform image avoids an unauthenticated build-time
+# binary download and keeps the app and sidecar on the same rclone version.
+COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
+RUN rclone version
 
 COPY scripts/kcef_download.sh /root/kcef_download.sh
 
@@ -76,13 +86,14 @@ ARG BUILD_DATE
 ARG TACHIDESK_RELEASE_TAG
 ARG TACHIDESK_FILENAME
 ARG TACHIDESK_DOCKER_GIT_COMMIT
-LABEL maintainer="suwayomi" \
-      org.opencontainers.image.title="Suwayomi Docker" \
-      org.opencontainers.image.authors="https://github.com/suwayomi" \
-      org.opencontainers.image.url="https://github.com/suwayomi/docker-tachidesk/pkgs/container/tachidesk" \
-      org.opencontainers.image.source="https://github.com/suwayomi/docker-tachidesk" \
-      org.opencontainers.image.description="This image is used to start suwayomi server in a container" \
-      org.opencontainers.image.vendor="suwayomi" \
+ARG IMAGE_SOURCE=https://github.com/IMXEren/Suwayomi-Server-docker
+LABEL maintainer="IMXEren" \
+      org.opencontainers.image.title="Suwayomi Server (IMXEren fork)" \
+      org.opencontainers.image.authors="https://github.com/IMXEren" \
+      org.opencontainers.image.url="https://github.com/IMXEren/Suwayomi-Server-docker/pkgs/container/suwayomi-server-docker" \
+      org.opencontainers.image.source=$IMAGE_SOURCE \
+      org.opencontainers.image.description="Suwayomi-Server fork with personal archival support, packaged for the IMXEren deployment" \
+      org.opencontainers.image.vendor="IMXEren" \
       org.opencontainers.image.created=$BUILD_DATE \
       org.opencontainers.image.version=$TACHIDESK_RELEASE_TAG \
       tachidesk.docker_commit=$TACHIDESK_DOCKER_GIT_COMMIT \

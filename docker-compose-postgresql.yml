@@ -1,7 +1,7 @@
 ---
 services:
   suwayomi:
-    image: ghcr.io/suwayomi/suwayomi-server:preview
+    image: ${SUWAYOMI_IMAGE:-ghcr.io/imxeren/suwayomi-server-docker:dev}
     # user: 1000:1000
     environment:
       - TZ=${TZ:-Etc/UTC} # Add a TZ variable to .env to change it
@@ -38,7 +38,7 @@ services:
     volumes:
       - ./data:/home/suwayomi/.local/share/Tachidesk
     ports:
-      - "4567:4567"
+      - "127.0.0.1:4567:4567"
     restart: on-failure:3
 
   postgresql:

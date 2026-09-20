@@ -1,2 +1,9 @@
 data/
 .idea
+
+# Deployment secrets and local overrides - never commit these.
+secrets/
+.env
+
+# Release tooling
+node_modules/

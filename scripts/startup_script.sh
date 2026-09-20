@@ -145,6 +145,14 @@ sed -i -r "s/server.koreaderSyncPercentageTolerance = ([-0-9\.Ee]+)?( #)/server.
 sed -i -r "s/server.koreaderSyncStrategyForward = \"*([a-zA-Z0-9_]+)\"*( #)?/server.koreaderSyncStrategyForward = ${KOREADER_SYNC_STRATEGY_FORWARD:-\1} #/" /home/suwayomi/.local/share/Tachidesk/server.conf
 sed -i -r "s/server.koreaderSyncStrategyBackward = \"*([a-zA-Z0-9_]+)\"*( #)?/server.koreaderSyncStrategyBackward = ${KOREADER_SYNC_STRATEGY_BACKWARD:-\1} #/" /home/suwayomi/.local/share/Tachidesk/server.conf
 
+# archival
+# The archive root is a mounted object-storage view (/archive); the staging root stays local.
+# ARCHIVE_RCLONE_* let the image run direct-remote verification with the same rclone.conf.
+sed -i -r "s|server.archivePath = \"(.*?)\"( #)?|server.archivePath = \"${ARCHIVE_PATH:-\1}\" #|" /home/suwayomi/.local/share/Tachidesk/server.conf
+sed -i -r "s|server.archiveStagingPath = \"(.*?)\"( #)?|server.archiveStagingPath = \"${ARCHIVE_STAGING_PATH:-\1}\" #|" /home/suwayomi/.local/share/Tachidesk/server.conf
+sed -i -r "s|server.archiveRcloneRemote = \"(.*?)\"( #)?|server.archiveRcloneRemote = \"${ARCHIVE_RCLONE_REMOTE:-\1}\" #|" /home/suwayomi/.local/share/Tachidesk/server.conf
+sed -i -r "s|server.archiveRcloneExecutable = \"(.*?)\"( #)?|server.archiveRcloneExecutable = \"${ARCHIVE_RCLONE_EXECUTABLE:-\1}\" #|" /home/suwayomi/.local/share/Tachidesk/server.conf
+
 # database
 sed -i -r "s/server.databaseType = \"*([a-zA-Z0-9_]+)\"*( #)?/server.databaseType = ${DATABASE_TYPE:-\1} #/" /home/suwayomi/.local/share/Tachidesk/server.conf
 sed -i -r "s|server.databaseUrl = \"(.*?)\"( #)?|server.databaseUrl = \"${DATABASE_URL:-\1}\" #|" /home/suwayomi/.local/share/Tachidesk/server.conf

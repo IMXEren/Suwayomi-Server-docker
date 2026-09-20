@@ -2,7 +2,7 @@
 
 [Container]
 Environment=TZ=Etc/UTC # Use TZ database name from https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
-Image=ghcr.io/suwayomi/suwayomi-server:preview
+Image=ghcr.io/imxeren/suwayomi-server-docker:dev
 PublishPort=4567:4567
 
 UserNS=keep-id

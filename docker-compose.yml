@@ -1,40 +1,120 @@
 ---
-services:
-  suwayomi:
-    image: ghcr.io/suwayomi/suwayomi-server:preview
-    # user: 1000:1000
-    environment:
-      - TZ=Etc/UTC # Use TZ database name from https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
-      # Comment these out if you do not use the flaresolverr container at the bottom of this file
-      - FLARESOLVERR_ENABLED=true
-      - FLARESOLVERR_URL=http://flaresolverr:8191
-#  #################################################################################################
+# Compose-first deployment for the IMXEren Suwayomi fork.
 #
-#    !!! IMPORTANT !!!
-#     - server settings can be changed during runtime in the WebUI
-#     - providing an environment variable will OVERWRITE the current setting value when starting the container
+# Caddy and cloudflared are deliberately NOT part of this file: they stay as host
+# systemd units because they own the public TLS endpoint and the Cloudflare tunnel
+# (see docs/DEPLOY.md). Suwayomi and the rclone FUSE sidecar run here and are kept
+# alive by Docker restart policies instead of a host systemd compose wrapper.
 #
-#  #################################################################################################
-#
-#    example for setting env vars:
-#
-#      - BIND_IP=0.0.0.0
-#      - BIND_PORT=4567
-#      - SOCKS_PROXY_ENABLED=false
-#      - DOWNLOAD_AS_CBZ=true
-#      - AUTH_MODE=basic_auth
-#      - AUTH_USERNAME=manga
-#      - AUTH_PASSWORD=hello123
-#      - EXTENSION_STORES=["https://raw.githubusercontent.com/MY_ACCOUNT/MY_EXTENSION_STORE/repo/index.min.json", "https://raw.githubusercontent.com/MY_ACCOUNT_2/MY_REPO_2/repo/index.pb"]
-    volumes:
-      - ./data:/home/suwayomi/.local/share/Tachidesk
-    ports:
-      - "4567:4567"
-    restart: on-failure:3
+# Credentials never appear in this file or in the environment. They come from Compose
+# secrets materialised from ./secrets (gitignored):
+#   ./secrets/rclone.conf     rclone remote definition (also used by the app image)
+#   ./secrets/auth_password   Suwayomi auth password
+name: suwayomi
 
+services:
+  # rclone FUSE sidecar: mounts the B2 archive remote on the shared host path so the
+  # host kernel, Suwayomi and (through the same host path) other readers all see it.
+  rclone:
+    image: rclone/rclone:1.75.1
+    container_name: suwayomi-rclone
+    restart: unless-stopped
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    command:
+      - mount
+      - "${RCLONE_REMOTE:?set RCLONE_REMOTE in .env, e.g. suwayomi-b2:suwayomi/archive}"
+      - /data
+      - --config=/run/secrets/rclone.conf
+      - --cache-dir=/cache
+      - --vfs-cache-mode=full
+      - --vfs-cache-max-size=${RCLONE_VFS_CACHE_MAX_SIZE:-50G}
+      - --vfs-cache-max-age=${RCLONE_VFS_CACHE_MAX_AGE:-168h}
+      - --vfs-write-back=${RCLONE_VFS_WRITE_BACK:-10s}
+      - --dir-cache-time=${RCLONE_DIR_CACHE_TIME:-10m}
+      - --poll-interval=${RCLONE_POLL_INTERVAL:-1m}
+      - --allow-other
+      - --uid=1000
+      - --gid=1000
+      - --umask=002
+      - --log-level=${RCLONE_LOG_LEVEL:-INFO}
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+    volumes:
+      # ARCHIVE_HOST_PATH must be a shared (rshared) mount on the host, otherwise the
+      # FUSE mount made inside the container does not propagate back to the host and
+      # the Suwayomi bind mount below would see an empty directory. See docs/DEPLOY.md.
+      - ${ARCHIVE_HOST_PATH:-/srv/suwayomi/archive}:/data:rshared
+      # Local VFS cache survives container restarts and keeps the mount usable offline.
+      - rclone-cache:/cache
+    secrets:
+      - rclone.conf
+    healthcheck:
+      # Verifies the remote and credentials, not just the mount process: the sidecar is
+      # only useful if the app can also reach the archive directly.
+      test: ["CMD", "rclone", "lsjson", "--config=/run/secrets/rclone.conf", "${RCLONE_REMOTE:-}"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+
+  suwayomi:
+    image: ${SUWAYOMI_IMAGE:-ghcr.io/imxeren/suwayomi-server-docker:stable}
+    container_name: suwayomi
+    restart: unless-stopped
+    depends_on:
+      rclone:
+        condition: service_healthy
+        restart: true
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      # Archive wiring. The mounted B2 view is /archive, never the legacy downloads dir
+      # (downloads and the revision staging root stay on the local ./data volume).
+      - ARCHIVE_PATH=/archive
+      - ARCHIVE_STAGING_PATH=/home/suwayomi/.local/share/Tachidesk/staging
+      - ARCHIVE_RCLONE_REMOTE=${RCLONE_REMOTE:-}
+      - ARCHIVE_RCLONE_EXECUTABLE=rclone
+      # The same rclone.conf the sidecar uses, so direct `rclone lsjson` / `rclone link`
+      # verification runs against the remote instead of the FUSE mount.
+      - RCLONE_CONFIG=/run/secrets/rclone.conf
+      # Native UI login is enabled by default; the password comes from a Compose secret.
+      - AUTH_MODE=${AUTH_MODE:-ui_login}
+      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
+      - AUTH_PASSWORD_FILE=/run/secrets/auth_password
+      - FLARESOLVERR_ENABLED=${FLARESOLVERR_ENABLED:-false}
+      - FLARESOLVERR_URL=http://flaresolverr:8191
+    volumes:
+      # Local data: H2 database, downloads and the revision staging root.
+      - ./data:/home/suwayomi/.local/share/Tachidesk
+      # The archive view is the rclone sidecar's mount, reached through the shared host path.
+      - ${ARCHIVE_HOST_PATH:-/srv/suwayomi/archive}:/archive:rshared
+    # Reachable only through the host reverse proxy / tunnel, never directly.
+    ports:
+      - "127.0.0.1:4567:4567"
+    secrets:
+      - rclone.conf
+      - auth_password
+
+  # Optional Cloudflare challenge solver. Enable with `docker compose --profile flaresolverr up -d`
+  # and set FLARESOLVERR_ENABLED=true in .env.
   flaresolverr:
     image: ghcr.io/thephaseless/byparr:latest
     container_name: flaresolverr
+    profiles:
+      - flaresolverr
     environment:
-      - TZ=Etc/UTC # Use TZ database name from https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+      - TZ=${TZ:-Etc/UTC}
     restart: unless-stopped
+
+volumes:
+  rclone-cache:
+
+secrets:
+  rclone.conf:
+    file: ./secrets/rclone.conf
+  auth_password:
+    file: ./secrets/auth_password
