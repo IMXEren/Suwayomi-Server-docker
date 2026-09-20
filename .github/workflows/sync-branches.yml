@@ -1,0 +1,74 @@
+name: Sync branches
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+# Keeps a draft dev -> main pull request open so a stable release is one merge away,
+# and back-merges main into dev after a stable release without rewriting dev history.
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  dev-to-main:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Open or refresh draft dev -> main pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch origin main dev
+          ahead="$(git rev-list --count origin/main..origin/dev)"
+          if [ "$ahead" = "0" ]; then
+            echo "dev is not ahead of main; nothing to propose"
+            exit 0
+          fi
+          number="$(gh pr list --base main --head dev --state open --json number --jq '.[0].number')"
+          body="Automated draft pull request keeping main in sync with dev. Merging it cuts a stable release."
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --title "chore: release dev to main" --body "$body"
+          else
+            gh pr create --draft --base main --head dev \
+              --title "chore: release dev to main" --body "$body"
+          fi
+
+  back-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Back-merge main into dev
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch origin main dev
+          ahead="$(git rev-list --count origin/dev..origin/main)"
+          if [ "$ahead" = "0" ]; then
+            echo "main has nothing dev lacks; nothing to back-merge"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout dev
+          if git merge --no-edit origin/main; then
+            git push origin dev
+            exit 0
+          fi
+          git merge --abort
+          echo "automatic back-merge hit a conflict; opening a pull request instead"
+          gh pr create --base dev --head main \
+            --title "chore: back-merge main into dev" \
+            --body "Automatic back-merge conflicted. Resolve manually and delete this branch after." || true
