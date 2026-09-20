@@ -73,7 +73,7 @@ services:
       rclone:
         condition: service_healthy
         restart: true
-      flaresolverr:
+      trawl:
         condition: service_started
     environment:
       - TZ=${TZ:-Etc/UTC}
@@ -104,7 +104,7 @@ services:
       - KCEF_ENABLED=${KCEF_ENABLED:-true}
       - MAX_SOURCES_IN_PARALLEL=${MAX_SOURCES_IN_PARALLEL:-4}
       - FLARESOLVERR_ENABLED=${FLARESOLVERR_ENABLED:-true}
-      - FLARESOLVERR_URL=http://flaresolverr:8191
+      - FLARESOLVERR_URL=http://trawl:8191
     volumes:
       # Local data: H2 database, downloads and the revision staging root.
       - ${DATA_HOST_PATH:-./data}:/home/suwayomi/.local/share/Tachidesk
@@ -119,15 +119,35 @@ services:
       - rclone.conf
       - auth_password
 
-  # Cloudflare challenge solver. Started by default because it is enabled in the app by
-  # default (FLARESOLVERR_ENABLED=true). Set FLARESOLVERR_ENABLED=false in .env to disable
-  # the integration, or stop just this service with `docker compose stop flaresolverr`.
-  flaresolverr:
-    image: ghcr.io/thephaseless/byparr:latest
-    container_name: flaresolverr
+  # Challenge solver behind the app's FlareSolverr-compatible client. TRAWL's own egress goes
+  # through the host WARP proxy (see warp-bridge below), because this host's address is blocked
+  # by at least one Cloudflare zone while the WARP address is only challenged.
+  trawl:
+    image: ghcr.io/germondai/trawl:latest
+    container_name: trawl
+    restart: unless-stopped
+    # Camoufox (Firefox) needs more shared memory than the container default.
+    shm_size: 512m
     environment:
       - TZ=${TZ:-Etc/UTC}
+      # One warm browser is enough for a single-user instance.
+      - BROWSER_POOL_SIZE=${TRAWL_BROWSER_POOL_SIZE:-1}
+      # Keep the session cache in-process so no Redis service is required.
+      - SESSION_CACHE_DRIVER=memory
+      # Tier 3 proxy: the host WARP SOCKS proxy exposed by warp-bridge.
+      - PROXY_URL=${TRAWL_PROXY_URL:-socks5://host.docker.internal:40001}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Exposes the host WARP SOCKS proxy (loopback only) to the compose network, so containers can
+  # reach it at host.docker.internal:${WARP_PROXY_PORT}. Requires `warp-cli mode proxy` on the
+  # host; it does not route any traffic by itself.
+  warp-bridge:
+    image: alpine/socat:latest
+    container_name: warp-bridge
     restart: unless-stopped
+    network_mode: host
+    command: TCP-LISTEN:${WARP_PROXY_PORT:-40001},fork,reuseaddr TCP:127.0.0.1:${WARP_PROXY_SOURCE_PORT:-40000}
 
 volumes:
   rclone-cache:

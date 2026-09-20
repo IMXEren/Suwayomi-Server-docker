@@ -220,6 +220,47 @@ A permissions mistake here is easy to make and fails at runtime only: the app ru
 uid 1000, so a `root:root 0400` secret is readable by the sidecar but **not** by the app,
 and `rclone lsjson` then fails with `permission denied` even though the mount works.
 
+### Challenge solving (TRAWL + WARP)
+
+The app talks to a FlareSolverr-compatible endpoint (`FLARESOLVERR_URL=http://trawl:8191`). TRAWL
+is used instead of FlareSolverr/Byparr because it escalates through plain HTTP, a cached browser
+session, a fresh solve, and finally a proxy, and because its proxy tier can be pointed at a
+different egress.
+
+That egress matters: at least one Cloudflare zone answers this host with a hard block page
+(`Attention Required!`) while the same URL through Cloudflare WARP only returns a solvable
+challenge. The host therefore runs WARP in **proxy** mode, never in full-tunnel mode, so host
+traffic (SSH, image pulls, the Cloudflare Tunnel) keeps its normal route:
+
+```sh
+sudo warp-cli --accept-tos registration new
+sudo warp-cli --accept-tos mode proxy
+sudo warp-cli --accept-tos connect
+sudo warp-cli --accept-tos status        # Connected
+ss -ltnp | grep 40000                    # warp-svc listening on 127.0.0.1:40000
+```
+
+WARP's proxy listens on loopback only, so the `warp-bridge` service forwards it onto the host
+network where the compose network can reach it:
+
+```sh
+docker compose exec trawl sh -lc 'env | grep PROXY_URL'
+docker compose exec trawl sh -lc \
+  'curl -s --socks5-hostname host.docker.internal:40001 https://api.ipify.org; echo'
+```
+
+The second command must print the WARP address, not this host's own address. To check the solver
+end to end:
+
+```sh
+docker compose exec trawl sh -lc \
+  'curl -s -X POST -H "Content-Type: application/json" \
+     -d "{\"cmd\":\"request.get\",\"url\":\"https://example.com\",\"maxTimeout\":60000}" \
+     http://127.0.0.1:8191/v1 | head -c 200'
+```
+
+Rollback: set `FLARESOLVERR_URL=http://flaresolverr:8191` and re-add the previous Byparr service.
+
 ### Bundled WebUI
 
 The `Custom` flavor serves the copy under the data root and never manages it, so the image
