@@ -1,3 +1,10 @@
+## [0.1.0-dev.2](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.1...v0.1.0-dev.2) (2026-09-20)
+
+### Bug Fixes
+
+* **ci:** authenticate the release lookup to avoid API rate limits ([6d8fd1e](https://github.com/IMXEren/Suwayomi-Server-docker/commit/6d8fd1e70f431064e501b87bed2a64c0fb3de6b9))
+* **release:** publish the image as ghcr.io/imxeren/suwayomi-server ([e43a1f5](https://github.com/IMXEren/Suwayomi-Server-docker/commit/e43a1f5f5fc0db7e4ef981c87bd6f080cd4b8901))
+
 ## [0.1.0-dev.1](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.0.0...v0.1.0-dev.1) (2026-09-20)
 
 ### Features
