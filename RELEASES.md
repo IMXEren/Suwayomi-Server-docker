@@ -1,3 +1,9 @@
+## [0.1.0-dev.6](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.5...v0.1.0-dev.6) (2026-09-20)
+
+### Features
+
+* **deploy:** replace the challenge solver with TRAWL behind WARP ([5c1382c](https://github.com/IMXEren/Suwayomi-Server-docker/commit/5c1382ca900d7b17c0579efb823547a3e8ee9ed3))
+
 ## [0.1.0-dev.5](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.4...v0.1.0-dev.5) (2026-09-20)
 
 ### Features
