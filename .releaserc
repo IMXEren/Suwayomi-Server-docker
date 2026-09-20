@@ -29,7 +29,12 @@
         "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }
     ],
-    ["@semantic-release/exec", { "publishCmd": "node scripts/release/publish.mjs" }],
+    [
+      "@semantic-release/exec",
+      {
+        "publishCmd": "node scripts/release/publish.mjs '${nextRelease.version}' '${nextRelease.channel || ''}'"
+      }
+    ],
     ["@semantic-release/github", { "successComment": false }]
   ]
 }

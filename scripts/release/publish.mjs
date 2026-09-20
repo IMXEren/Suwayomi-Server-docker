@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Invoked by @semantic-release/exec as the publishCmd. It reads the release computed
-// by semantic-release from the environment and builds + pushes the multi-arch GHCR
-// image whose input is the matching JAR asset of IMXEren/Suwayomi-Server.
+// by semantic-release from its arguments (semantic-release only interpolates the command
+// string, it does not export nextRelease.* as environment variables) and builds + pushes
+// the multi-arch GHCR image whose input is the matching JAR asset of IMXEren/Suwayomi-Server.
 //
 // Stable (channel unset)   -> tags: latest, stable, <version>
 // Prerelease (channel=dev) -> tags: dev, <version>
@@ -33,11 +34,19 @@ async function ghJson(url) {
 async function pickJarRelease(isPrerelease) {
   const releases = await ghJson(`${GITHUB_API}/repos/${SOURCE_REPO}/releases?per_page=30`);
   const withJar = releases.filter((r) => Array.isArray(r.assets) && r.assets.some((a) => /\.jar$/i.test(a.name)));
-  const chosen =
-    (isPrerelease
-      ? withJar.find((r) => r.prerelease || r.tag_name.includes("-"))
-      : withJar.find((r) => !r.prerelease)) || withJar[0];
-  if (!chosen) throw new Error(`no release with a JAR asset found for ${SOURCE_REPO}`);
+  if (withJar.length === 0) throw new Error(`no release with a JAR asset found for ${SOURCE_REPO}`);
+
+  const wanted = isPrerelease
+    ? withJar.find((r) => r.prerelease || r.tag_name.includes("-"))
+    : withJar.find((r) => !r.prerelease);
+
+  // A stable image can only be built from a stable JAR. Until the source repository has
+  // published one, fall back to the newest prerelease instead of failing the release.
+  const chosen = wanted || withJar[0];
+  if (!wanted && !isPrerelease) {
+    console.warn(`no stable release with a JAR asset found for ${SOURCE_REPO}; falling back to ${chosen.tag_name}`);
+  }
+
   const asset = chosen.assets.find((a) => /\.jar$/i.test(a.name));
   return { tag: chosen.tag_name, url: asset.browser_download_url, filename: asset.name };
 }
@@ -58,9 +67,21 @@ async function detectJbrTag(jarUrl) {
   }
 }
 
-const version = process.env["nextRelease.version"];
-if (!version) throw new Error("nextRelease.version is not set; publish.mjs must run through semantic-release");
-const channel = process.env["nextRelease.channel"] || "";
+// semantic-release interpolates these into the publishCmd string; the environment fallback
+// exists so the script can also be exercised directly.
+function normalize(value) {
+  const text = (value ?? "").trim();
+  return !text || text === "undefined" || text === "null" ? "" : text;
+}
+
+const version = normalize(process.argv[2] || process.env.RELEASE_VERSION);
+if (!version) {
+  throw new Error(
+    "no release version was passed; publish.mjs must run through semantic-release with " +
+      "nextRelease.version interpolated into the publishCmd",
+  );
+}
+const channel = normalize(process.argv[3] || process.env.RELEASE_CHANNEL);
 const isPrerelease = channel !== "";
 const sourceBranch = process.env.SUWAYOMI_SOURCE_BRANCH || (isPrerelease ? "dev" : "main");
 
@@ -92,6 +113,12 @@ if (jbrTag) {
 }
 
 console.log(`building ${image} for ${PLATFORMS} (channel=${channel || "stable"}, source tag=${release.tag})`);
+
+if (normalize(process.env.RELEASE_DRY_RUN)) {
+  console.log(`dry run: docker buildx build --platform ${PLATFORMS} ${[...buildArgs, ...tags.flatMap((tag) => ["-t", tag]), "--push"].join(" ")} .`);
+  process.exit(0);
+}
+
 run("docker", [
   "buildx",
   "build",
