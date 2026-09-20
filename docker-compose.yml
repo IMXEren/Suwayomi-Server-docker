@@ -82,14 +82,26 @@ services:
       # verification runs against the remote instead of the FUSE mount.
       - RCLONE_CONFIG=/run/secrets/rclone.conf
       # Native UI login is enabled by default; the password comes from a Compose secret.
-      - AUTH_MODE=${AUTH_MODE:-ui_login}
+      # AUTH_MODE uses the exact AuthMode enum name.
+      - AUTH_MODE=${AUTH_MODE:-UI_LOGIN}
       - AUTH_USERNAME=${AUTH_USERNAME:-admin}
       - AUTH_PASSWORD_FILE=/run/secrets/auth_password
+      - BIND_IP=${BIND_IP:-0.0.0.0}
+      - BIND_PORT=${BIND_PORT:-4567}
+      # Serve the WebUI bundled in this image and never let the server replace it with an
+      # upstream release: the archival dashboard only exists in the bundled build.
+      - WEB_UI_ENABLED=${WEB_UI_ENABLED:-true}
+      - WEB_UI_FLAVOR=${WEB_UI_FLAVOR:-Custom}
+      - WEB_UI_CHANNEL=${WEB_UI_CHANNEL:-BUNDLED}
+      - WEB_UI_UPDATE_INTERVAL=${WEB_UI_UPDATE_INTERVAL:-0}
+      # Headless server: the embedded Chromium (KCEF) is not needed and costs a lot of RAM.
+      - KCEF_ENABLED=${KCEF_ENABLED:-false}
+      - MAX_SOURCES_IN_PARALLEL=${MAX_SOURCES_IN_PARALLEL:-4}
       - FLARESOLVERR_ENABLED=${FLARESOLVERR_ENABLED:-false}
       - FLARESOLVERR_URL=http://flaresolverr:8191
     volumes:
       # Local data: H2 database, downloads and the revision staging root.
-      - ./data:/home/suwayomi/.local/share/Tachidesk
+      - ${DATA_HOST_PATH:-./data}:/home/suwayomi/.local/share/Tachidesk
       # The archive view is the rclone sidecar's mount, reached through the shared host path.
       - ${ARCHIVE_HOST_PATH:-/srv/suwayomi/archive}:/archive:rshared
     # Reachable only through the host reverse proxy / tunnel, never directly.
