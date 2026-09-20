@@ -58,6 +58,27 @@ sed -i -r "s/server.webUIFlavor = \"*([a-zA-Z0-9_]+)\"*( #)?/server.webUIFlavor 
 sed -i -r "s/server.webUIChannel = \"*([a-zA-Z0-9_]+)\"*( #)?/server.webUIChannel = ${WEB_UI_CHANNEL:-\1} #/" /home/suwayomi/.local/share/Tachidesk/server.conf
 sed -i -r "s/server.webUIUpdateCheckInterval = ([0-9]+|[a-zA-Z]+)( #)?/server.webUIUpdateCheckInterval = ${WEB_UI_UPDATE_INTERVAL:-\1} #/" /home/suwayomi/.local/share/Tachidesk/server.conf
 
+# With the "Custom" flavor the server serves the data directory copy as-is and never manages it,
+# so the image syncs that copy with the WebUI.zip bundled in the jar; otherwise an upgrade would
+# keep serving the previously extracted WebUI.
+if [ "${WEB_UI_FLAVOR:-}" = "Custom" ]; then
+  webui_root="/home/suwayomi/.local/share/Tachidesk/webUI"
+  webui_tmp="$(mktemp -d)"
+  if unzip -o -q /home/suwayomi/startup/tachidesk_latest.jar WebUI.zip -d "$webui_tmp" 2>/dev/null; then
+    bundled_revision="$(unzip -p "$webui_tmp/WebUI.zip" revision 2>/dev/null || true)"
+    installed_revision="$(cat "$webui_root/revision" 2>/dev/null || true)"
+    if [ -n "$bundled_revision" ] && [ "$bundled_revision" != "$installed_revision" ]; then
+      echo "Updating bundled WebUI: ${installed_revision:-<none>} -> $bundled_revision"
+      rm -rf "$webui_root"
+      mkdir -p "$webui_root"
+      unzip -o -q "$webui_tmp/WebUI.zip" -d "$webui_root"
+    fi
+  else
+    echo "No bundled WebUI.zip found in the jar; keeping the existing WebUI" >&2
+  fi
+  rm -rf "$webui_tmp"
+fi
+
 # downloader
 sed -i -r "s/server.downloadAsCbz = ([0-9]+|[a-zA-Z]+)( #)?/server.downloadAsCbz = ${DOWNLOAD_AS_CBZ:-\1} #/" /home/suwayomi/.local/share/Tachidesk/server.conf
 sed -i -r "s/server.autoDownloadNewChapters = ([0-9]+|[a-zA-Z]+)( #)?/server.autoDownloadNewChapters = ${AUTO_DOWNLOAD_CHAPTERS:-\1} #/" /home/suwayomi/.local/share/Tachidesk/server.conf
