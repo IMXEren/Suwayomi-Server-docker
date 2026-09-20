@@ -220,6 +220,18 @@ A permissions mistake here is easy to make and fails at runtime only: the app ru
 uid 1000, so a `root:root 0400` secret is readable by the sidecar but **not** by the app,
 and `rclone lsjson` then fails with `permission denied` even though the mount works.
 
+### Bundled WebUI
+
+The `Custom` flavor serves the copy under the data root and never manages it, so the image
+syncs that copy from the WebUI.zip inside the jar on every start. A revision change is logged:
+
+```sh
+docker compose logs suwayomi | grep "Updating bundled WebUI"
+```
+
+This is what makes an image upgrade actually change the served WebUI, and it is also the
+revision the app reports as its WebUI version.
+
 ### FlareSolverr
 
 FlareSolverr (Byparr) runs by default and is enabled in the app. A root request answers
