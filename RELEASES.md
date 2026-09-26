@@ -1,3 +1,10 @@
+## [0.1.0-dev.9](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.8...v0.1.0-dev.9) (2026-09-26)
+
+### Features
+
+* **egress:** configure named upstreams and probe host routing ([353b42d](https://github.com/IMXEren/Suwayomi-Server-docker/commit/353b42d429fd70baf53f57c74a641b0527b1a8e3))
+* **stack:** run Prowl WebView and egress services ([86eb7f0](https://github.com/IMXEren/Suwayomi-Server-docker/commit/86eb7f06679af84b16efd744272ef902bce460b9))
+
 ## [0.1.0-dev.8](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.7...v0.1.0-dev.8) (2026-09-20)
 
 ### Bug Fixes
