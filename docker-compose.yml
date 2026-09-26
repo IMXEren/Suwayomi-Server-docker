@@ -189,8 +189,8 @@ services:
       - "host.docker.internal:host-gateway"
 
   # Browser service that solves Cloudflare challenges for the app's FlareSolverr-compatible
-  # client. It owns a persistent trust profile and egresses through the host WARP proxy,
-  # because this host's own address is hard-blocked by at least one Cloudflare zone.
+  # client. It owns a persistent trust profile and egresses through the same per-host
+  # routing hop as the app, so clearance cookies are acquired from the app's exit IP.
   prowl:
     image: ${PROWL_IMAGE:-prowl:local}
     restart: unless-stopped

@@ -127,8 +127,8 @@ Compose project at boot.
    re-run: follow "Changing the upstreams config" below.
 
 3. Build Prowl from its source at `v1.2.0-dev.1` or later (the first release with the
-   interactive browser API) as `prowl:local` before starting Compose. Prowl does not publish
-   OCI images; `v1.1.0` lacks the `browser.open`/`cookies.list` commands used here.
+   interactive browser API) as `prowl:local` before starting Compose. This template does not
+   supply an image; `v1.1.0` lacks the `browser.open`/`cookies.list` commands used here.
    Follow Prowl's Dockerfile for any optional private-font build context. An image already
    built from compatible source can be reused; it is not part of this repository.
 
