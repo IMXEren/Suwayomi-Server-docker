@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Window management for the browser display.
+
+  Everything is maximized as it appears, which is what makes the browser fit the screen: the
+  browser asks for a window slightly larger than the display, and without a window manager that
+  request is honoured and the right edge and the bottom of the window are clipped.
+
+  Decorations are kept: the title bar carries the close and maximize controls that the browser
+  would otherwise draw off screen. The layout string lists iconify, maximize and close on the
+  right, so the close control sits in the top right as expected.
+-->
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <theme>
+    <name>Clearlooks</name>
+    <titleLayout>NLIMC</titleLayout>
+    <keepBorder>yes</keepBorder>
+  </theme>
+  <applications>
+    <application class="*">
+      <maximized>yes</maximized>
+      <decor>yes</decor>
+    </application>
+  </applications>
+</openbox_config>

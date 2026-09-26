@@ -57,12 +57,14 @@ services:
     secrets:
       - rclone.conf
     healthcheck:
-      # Verifies the remote and credentials, not just the mount process: the sidecar is
-      # only useful if the app can also reach the archive directly.
-      test: ["CMD", "rclone", "lsjson", "--config=/run/secrets/rclone.conf", "${RCLONE_REMOTE:-}"]
-      interval: 30s
-      timeout: 15s
-      retries: 5
+      # Checks the mount itself, not the remote. A remote probe (rclone lsjson) runs a Class C
+      # transaction on every interval, and at 30s that alone is ~2,900 transactions a day, which
+      # trips Backblaze's transaction cap and takes the archive down with it. The mount point is
+      # what the app actually needs, and /proc/mounts answers without touching the network.
+      test: ["CMD-SHELL", "grep -q ' /data ' /proc/mounts"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
       start_period: 30s
 
   suwayomi:
@@ -71,10 +73,12 @@ services:
     restart: unless-stopped
     depends_on:
       rclone:
-        condition: service_healthy
-        restart: true
-      trawl:
+        # Started, not healthy: a remote-side problem (an expired credential, or a Backblaze
+        # transaction cap) must not keep the app itself from starting.
         condition: service_started
+        restart: true
+      prowl:
+        condition: service_healthy
     environment:
       - TZ=${TZ:-Etc/UTC}
       # Archive wiring. The mounted B2 view is /archive, never the legacy downloads dir
@@ -99,8 +103,9 @@ services:
       - WEB_UI_FLAVOR=${WEB_UI_FLAVOR:-Custom}
       - WEB_UI_CHANNEL=${WEB_UI_CHANNEL:-BUNDLED}
       - WEB_UI_UPDATE_INTERVAL=${WEB_UI_UPDATE_INTERVAL:-0}
-      # The embedded Chromium (KCEF) backs the in-app WebView. It needs the raised shm_size
-      # declared below, because the 64 MiB container default makes the renderer crash.
+      # The embedded Chromium (KCEF). It is not initialized while WEB_VIEW_PROVIDER selects the
+      # external browser (the default below); only the CEF path needs this service's raised
+      # shm_size, because the 64 MiB container default makes the renderer crash.
       - KCEF_ENABLED=${KCEF_ENABLED:-true}
       - MAX_SOURCES_IN_PARALLEL=${MAX_SOURCES_IN_PARALLEL:-4}
       # Only the embedded Chromium (WebView) honours these; the JVM ignores proxy variables.
@@ -112,10 +117,20 @@ services:
       - http_proxy=${SUWAYOMI_HTTP_PROXY:-http://http-proxy:8118}
       - https_proxy=${SUWAYOMI_HTTP_PROXY:-http://http-proxy:8118}
       - all_proxy=${SUWAYOMI_HTTP_PROXY:-http://http-proxy:8118}
-      - NO_PROXY=${SUWAYOMI_NO_PROXY:-localhost,127.0.0.1,::1,trawl,suwayomi-rclone,http-proxy,warp-bridge,backblazeb2.com}
-      - no_proxy=${SUWAYOMI_NO_PROXY:-localhost,127.0.0.1,::1,trawl,suwayomi-rclone,http-proxy,warp-bridge,backblazeb2.com}
+      - NO_PROXY=${SUWAYOMI_NO_PROXY:-localhost,127.0.0.1,::1,suwayomi-rclone,http-proxy,warp-bridge,backblazeb2.com}
+      - no_proxy=${SUWAYOMI_NO_PROXY:-localhost,127.0.0.1,::1,suwayomi-rclone,http-proxy,warp-bridge,backblazeb2.com}
       - FLARESOLVERR_ENABLED=${FLARESOLVERR_ENABLED:-true}
-      - FLARESOLVERR_URL=http://trawl:8191
+      - FLARESOLVERR_URL=http://prowl:8191
+      # The WebView can either use the embedded browser or the external one, which is
+      # served through the authenticated VNC proxy on this origin.
+      - WEB_VIEW_PROVIDER=${WEB_VIEW_PROVIDER:-PROWL_VNC}
+      - WEB_VIEW_VNC_URL=${WEB_VIEW_VNC_URL:-http://vnc:6080}
+      # Source requests and the embedded WebView both egress through the hop, which
+      # selects an upstream per destination host. It must match PROWL_PROXY_URL below.
+      - SOCKS_PROXY_ENABLED=${SOCKS_PROXY_ENABLED:-true}
+      - SOCKS_PROXY_VERSION=5
+      - SOCKS_PROXY_HOST=${SOCKS_PROXY_HOST:-egress-hop}
+      - SOCKS_PROXY_PORT=${SOCKS_PROXY_PORT:-1080}
     volumes:
       # Local data: H2 database, downloads and the revision staging root.
       - ${DATA_HOST_PATH:-./data}:/home/suwayomi/.local/share/Tachidesk
@@ -124,39 +139,184 @@ services:
     # Reachable only through the host reverse proxy / tunnel, never directly.
     ports:
       - "127.0.0.1:4567:4567"
+    # The persisted SOCKS proxy settings point at the host WARP proxy, and the source HTTP
+    # client honours them, so the host gateway must resolve inside this container.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Chromium allocates from /dev/shm; Docker's 64 MiB default is not enough for KCEF.
     shm_size: ${SUWAYOMI_SHM_SIZE:-512m}
     secrets:
       - rclone.conf
       - auth_password
 
-  # Challenge solver behind the app's FlareSolverr-compatible client. TRAWL's own egress goes
-  # through the host WARP proxy (see warp-bridge below), because this host's address is blocked
-  # by at least one Cloudflare zone while the WARP address is only challenged.
-  trawl:
-    image: ghcr.io/germondai/trawl:latest
-    container_name: trawl
+  # Per-host egress switch. Source requests and the embedded WebView reach it through the app's
+  # SOCKS setting, and Prowl reaches it through PROWL_PROXY_URL. It picks a named upstream by
+  # destination host: the one whose rule file in egress-rules lists the host, and the configured
+  # fallback for everything else. Its configuration holds proxy credentials, so it lives in
+  # ./secrets and never in this file.
+  egress-hop:
+    image: gogost/gost:3
+    container_name: egress-hop
     restart: unless-stopped
-    # Camoufox (Firefox) needs more shared memory than the container default.
-    shm_size: 512m
-    environment:
-      - TZ=${TZ:-Etc/UTC}
-      # One warm browser is enough for a single-user instance.
-      - BROWSER_POOL_SIZE=${TRAWL_BROWSER_POOL_SIZE:-1}
-      # Keep the session cache in-process so no Redis service is required.
-      - SESSION_CACHE_DRIVER=memory
-      # Tier 3 proxy: the host WARP SOCKS proxy exposed by warp-bridge.
-      - PROXY_URL=${TRAWL_PROXY_URL:-socks5://host.docker.internal:40001}
-      # Optional Tier 4 escalation. Some zones keep challenging a datacenter or WARP address
-      # indefinitely, and only a residential/ISP egress clears them.
-      - RESIDENTIAL_PROXY_URL=${TRAWL_RESIDENTIAL_PROXY_URL:-}
+    command: -C /cfg.json
+    volumes:
+      - ./secrets/egress-hop.json:/cfg.json:ro
+      - ./egress-rules:/rules:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    expose:
+      - "1080"
+
+  # Keeps each watched host on an egress that still serves it. Runs periodically, probes every
+  # candidate upstream directly (the configured low-cost candidate first, so a host that can move
+  # off paid egress does), and rewrites the hop's rule files, which the hop hot-reloads. The hop
+  # mounts egress-rules read-only; this service needs it writable, so the two declare their own
+  # mount specs.
+  egress-prober:
+    image: python:3.12-alpine
+    container_name: egress-prober
+    restart: unless-stopped
+    command: >-
+      sh -c 'while true; do
+        python /app/egress-prober.py || true;
+        sleep ${EGRESS_PROBER_INTERVAL_SECONDS:-3600};
+      done'
+    volumes:
+      - ./secrets/egress-upstreams.json:/secrets/egress-upstreams.json:ro
+      - ./egress-rules:/egress-rules
+      - ./scripts/egress-prober.py:/app/egress-prober.py:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
-  # Local HTTP proxy for clients that only understand HTTP proxies — the embedded Chromium — and
-  # that cannot send proxy credentials at all. Point it at whatever egress is wanted: the host
-  # WARP SOCKS proxy by default, or an authenticated ISP/residential proxy whose credentials gost
-  # injects upstream.
+  # Browser service that solves Cloudflare challenges for the app's FlareSolverr-compatible
+  # client. It owns a persistent trust profile and egresses through the host WARP proxy,
+  # because this host's own address is hard-blocked by at least one Cloudflare zone.
+  prowl:
+    image: ${PROWL_IMAGE:-prowl:local}
+    restart: unless-stopped
+    depends_on:
+      display:
+        condition: service_healthy
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - DISPLAY=display:0
+      - PROWL_HOST=0.0.0.0
+      - PROWL_PORT=8191
+      # The headed browser's launch window, kept at the display size (GEOMETRY on the display
+      # service below) so the page lays out at the size actually visible instead of the larger
+      # persona fingerprint screen, which would clip the right edge and the bottom of the browser.
+      - PROWL_WINDOW_SIZE=${PROWL_WINDOW_SIZE:-1600x900}
+      - PROWL_PROFILE_DIR=/state/profile
+      - PROWL_PROFILE_ARCHIVE=/state/browser-profile.zip
+      # A few concurrent loads, so an interactive WebView does not starve the app's own solves.
+      - PROWL_MAX_CONCURRENCY=${PROWL_MAX_CONCURRENCY:-6}
+      # Interactive tabs are reaped after this long with no activity. The app polls the tab list
+      # while a view is open, and that poll is what counts as activity, so a tab being displayed
+      # stays alive and a forgotten one is collected. This is the backstop for a view that goes
+      # away without its socket closing, which would otherwise starve the fetch path the app's
+      # own challenge solving depends on.
+      - PROWL_INTERACTIVE_IDLE_SECONDS=${PROWL_INTERACTIVE_IDLE_SECONDS:-300}
+      - PROWL_MAX_SESSIONS=32
+      # Unpacked browser extensions, one subdirectory per extension, each with its manifest at
+      # its root. Prowl reads the directory at launch, so adding or removing one needs the
+      # service recreated rather than only restarted. The mount is writable on purpose: Chrome
+      # writes metadata beside an unpacked extension, and measured here, a read-only directory
+      # makes its startup hang rather than fail (60s with no debugging port, against 1.1s from a
+      # writable copy of the same extension).
+      - PROWL_EXTENSIONS_DIR=/extensions
+      # Chromium --proxy-server. The host address is blocked by Cloudflare, the WARP one is not.
+      - PROWL_PROXY_URL=socks5://${SOCKS_PROXY_HOST:-egress-hop}:${SOCKS_PROXY_PORT:-1080}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    expose:
+      - "8191"
+    volumes:
+      - prowl-state:/state
+      - ./extensions:/extensions
+    # Chromium allocates from /dev/shm. Measured on this host, 512m is ample: the browser
+    # uses none of it for ordinary navigation or challenge solving.
+    shm_size: ${PROWL_SHM_SIZE:-512m}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8191/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  # X display the headed browser above renders to.
+  display:
+    image: ghcr.io/imxeren/xvfb:main
+    restart: unless-stopped
+    environment:
+      # The client scales the framebuffer to the panel, so every pixel here is a pixel that has to
+      # cross the network. 1600x900 carries 31 percent fewer pixels than 1920x1080 and is still
+      # comfortable to read; raise it here or in .env if the detail is worth the bandwidth.
+      - GEOMETRY=${DISPLAY_GEOMETRY:-1600x900x24}
+      - DISPLAY=:0
+    volumes:
+      # The X socket, shared so the vnc surface below can attach to this server. Xvfb runs with
+      # access control disabled, so no Xauthority file is involved.
+      - xvfb-socket:/tmp/.X11-unix
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /tmp/.X11-unix/X0"]
+      interval: 1s
+      timeout: 2s
+      retries: 10
+      start_period: 2s
+
+  # Window management for the display above. A bare Xvfb honours whatever size a window asks for,
+  # which is larger than the screen, so without this the right edge and the bottom of the browser
+  # are clipped and its controls are unreachable. Nothing else is provided here: no desktop, no
+  # panel, no wallpaper.
+  wm:
+    build:
+      context: ./wm
+    image: ${WM_IMAGE:-suwayomi-wm:local}
+    container_name: suwayomi-wm
+    restart: unless-stopped
+    depends_on:
+      display:
+        condition: service_healthy
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - DISPLAY_NUM=${VNC_DISPLAY_NUM:-0}
+    volumes:
+      - xvfb-socket:/tmp/.X11-unix:ro
+
+  # VNC surface for the display. x11vnc attaches to the X socket above and websockify serves the
+  # noVNC client with a WebSocket bridge, so a browser can be driven from a web page instead of
+  # through the app's canvas protocol. Nothing is published to the host: the app brokers access,
+  # and the raw VNC port stays on loopback inside this container.
+  vnc:
+    build:
+      context: ./vnc
+    image: ${VNC_IMAGE:-suwayomi-vnc:local}
+    container_name: suwayomi-vnc
+    restart: unless-stopped
+    depends_on:
+      display:
+        condition: service_healthy
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - DISPLAY_NUM=${VNC_DISPLAY_NUM:-0}
+      - VNC_WEB_PORT=${VNC_WEB_PORT:-6080}
+    volumes:
+      - xvfb-socket:/tmp/.X11-unix:ro
+    expose:
+      - "${VNC_WEB_PORT:-6080}"
+    healthcheck:
+      # Both halves matter: the client being served and the VNC port being open behind it.
+      test:
+        - CMD
+        - bash
+        - -c
+        - curl -fsS -o /dev/null http://127.0.0.1:${VNC_WEB_PORT:-6080}/vnc.html && exec 3<>/dev/tcp/127.0.0.1/5900
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # HTTP-to-SOCKS bridge for clients that require an HTTP proxy.
   http-proxy:
     image: gogost/gost:3
     container_name: http-proxy
@@ -177,6 +337,13 @@ services:
 
 volumes:
   rclone-cache:
+  # X socket shared between the display and the VNC surface.
+  xvfb-socket:
+  # Declared external so the warmed browser profile from the standalone deployment is
+  # reused instead of a fresh, untrusted profile being created.
+  prowl-state:
+    external: true
+    name: prowl-state
 
 secrets:
   rclone.conf:

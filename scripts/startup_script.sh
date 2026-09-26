@@ -183,6 +183,8 @@ sed -i -r "s/server.useHikariConnectionPool = ([0-9]+|[a-zA-Z]+)( #)?/server.use
 
 # webview
 sed -i -r "s/server.kcefEnabled = ([0-9]+|[a-zA-Z]+)( #)?/server.kcefEnabled = ${KCEF_ENABLED:-\1} #/" /home/suwayomi/.local/share/Tachidesk/server.conf
+sed -i -r "s/server.webViewProvider = \"*([a-zA-Z0-9_]+)\"*( #)?/server.webViewProvider = ${WEB_VIEW_PROVIDER:-\1} #/" /home/suwayomi/.local/share/Tachidesk/server.conf
+sed -i -r "s|server.webViewVncUrl = \"(.*?)\"( #)?|server.webViewVncUrl = \"${WEB_VIEW_VNC_URL:-\1}\" #|" /home/suwayomi/.local/share/Tachidesk/server.conf
 
 # sync
 sed -i -r "s/server.syncYomiEnabled = ([0-9]+|[a-zA-Z]+)( #)?/server.syncYomiEnabled = ${SYNCYOMI_ENABLED:-\1} #/" /home/suwayomi/.local/share/Tachidesk/server.conf
