@@ -2,7 +2,10 @@ data/
 .idea
 
 # Deployment secrets and local overrides - never commit these.
-secrets/
+secrets/*
+# ... except the credential-free example and its README shape.
+!secrets/egress-upstreams.json.example
+!secrets/README.md
 .env
 
 # Release tooling
