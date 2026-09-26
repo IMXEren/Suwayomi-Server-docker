@@ -3,10 +3,17 @@
 #
 # The display runs Xvfb with access control disabled, so no Xauthority is involved. The socket
 # directory is a shared volume, which is what lets this container see the X server at all.
+#
+# x11vnc has been observed to stop serving while staying alive: it holds the listening socket,
+# accepts nothing, and the accept queue fills until clients time out mid-handshake, which shows up
+# as noVNC sitting on "Connecting...". It never recovers by itself, and only the TCP port being
+# open makes it look healthy. So it is supervised here rather than started once and trusted, and
+# "serving" is defined as completing the RFB banner exchange, not as holding the port.
 set -eu
 
 DISPLAY_NUM="${DISPLAY_NUM:-0}"
 WEB_PORT="${VNC_WEB_PORT:-6080}"
+WATCH_INTERVAL="${VNC_WATCH_INTERVAL_SECONDS:-20}"
 SOCKET="/tmp/.X11-unix/X${DISPLAY_NUM}"
 
 # The display service is started first and its healthcheck covers the socket, but a restart can
@@ -40,18 +47,62 @@ fi
 # what is not a lever here is damage tracking: X DAMAGE is available on this display and x11vnc
 # uses it for polling hints by default, so nothing disables it (the option to look for would be
 # -noxdamage, which is deliberately absent).
-x11vnc \
-    -display ":${DISPLAY_NUM}" \
-    -rfbport 5900 \
-    -localhost \
-    -shared \
-    -threads \
-    -forever \
-    -nopw \
-    -noshm \
-    -quiet \
-    -bg \
-    -o /tmp/x11vnc.log
+start_x11vnc() {
+    x11vnc \
+        -display ":${DISPLAY_NUM}" \
+        -rfbport 5900 \
+        -localhost \
+        -shared \
+        -threads \
+        -forever \
+        -nopw \
+        -noshm \
+        -quiet \
+        -o /tmp/x11vnc.log &
+    x11vnc_pid=$!
+    sleep 2
+}
 
-# Foreground process: the container lives exactly as long as the web surface does.
-exec websockify --web=/usr/share/novnc "${WEB_PORT}" 127.0.0.1:5900
+# The banner is the first thing any client needs, and the whole point is that it can go missing
+# while the port stays open, so the check reads it rather than connecting and hanging up.
+rfb_serving() {
+    timeout 8 bash -c 'exec 3<>/dev/tcp/127.0.0.1/5900; head -c 12 <&3; exec 3<&-' 2>/dev/null | grep -q 'RFB 003'
+}
+
+start_x11vnc
+websockify --web=/usr/share/novnc "${WEB_PORT}" 127.0.0.1:5900 &
+websockify_pid=$!
+
+# The container lives as long as its two servers do; either one dying is a restart-worthy failure.
+shutdown() {
+    kill "$x11vnc_pid" "$websockify_pid" 2>/dev/null || true
+    exit 0
+}
+trap shutdown TERM INT
+
+wedges=0
+while :; do
+    sleep "$WATCH_INTERVAL"
+
+    if ! kill -0 "$websockify_pid" 2>/dev/null; then
+        echo "websockify exited; restarting the container" >&2
+        exit 1
+    fi
+
+    if rfb_serving; then
+        wedges=0
+        continue
+    fi
+
+    wedges=$((wedges + 1))
+    echo "x11vnc is not serving the RFB handshake (wedges=${wedges}); restarting it" >&2
+    kill "$x11vnc_pid" 2>/dev/null || true
+    wait "$x11vnc_pid" 2>/dev/null || true
+    if [ "$wedges" -ge 3 ]; then
+        # Restarting it is not helping, so let Docker replace the whole container instead of
+        # looping here with a dead display.
+        echo "x11vnc kept wedging after restarts; restarting the container" >&2
+        exit 1
+    fi
+    start_x11vnc
+done
