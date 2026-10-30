@@ -1,4 +1,6 @@
 data/
+egress-rules/
+__pycache__/
 .idea
 
 # Deployment secrets and local overrides - never commit these.

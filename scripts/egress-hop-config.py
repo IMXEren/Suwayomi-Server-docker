@@ -30,11 +30,13 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import os
 import pathlib
 import re
 import sys
+from urllib.parse import quote
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -402,7 +404,46 @@ def write_rule_files(upstreams: list[Upstream], fallback_name: str, rules_local:
     print(f"rule files in {rules_local}: {len(exclude)} host(s) excluded from {fallback_name}")
 
 
-def write_private_file(path: pathlib.Path, content: str) -> None:
+def webview_egress_name(upstream: Upstream) -> str:
+    """Keep a browser profile tied to its exit even if the upstream list is reordered."""
+    identity = "\0".join((upstream.name, upstream.addr, upstream.username or ""))
+    return "exit-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+
+
+def render_prowl_egresses(upstreams: list[Upstream]) -> str:
+    """Produce a private named-egress spec from the hop's validated upstreams."""
+    return ",".join(
+        f"{webview_egress_name(upstream)}=socks5://"
+        + (
+            f"{quote(upstream.username, safe='')}:{quote(upstream.password, safe='')}@"
+            if upstream.username else ""
+        )
+        + upstream.addr
+        for upstream in upstreams
+    ) + "\n"
+
+
+def render_webview_egress_names(upstreams: list[Upstream]) -> str:
+    """Translate operator rule filenames into browser-context names without exposing proxies."""
+    return json.dumps({upstream.name: webview_egress_name(upstream) for upstream in upstreams}) + "\n"
+
+
+def write_route_map(path: pathlib.Path, content: str) -> None:
+    """Atomically publish a credential-free map readable by the Server's UID."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    temporary = pathlib.Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content.encode("utf-8"))
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def write_private_file(path: pathlib.Path, content: str, *, owner_uid: int | None = None) -> None:
     """Write *content* to *path* as 0600 through an atomic replace.
 
     The file holds credentials, so it is written into a fresh 0600 file in the same directory and
@@ -419,6 +460,8 @@ def write_private_file(path: pathlib.Path, content: str) -> None:
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(content.encode("utf-8"))
+        if owner_uid is not None:
+            os.chown(temporary, owner_uid, owner_uid)
         os.replace(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)
@@ -429,6 +472,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate the egress hop configuration.")
     parser.add_argument("--upstreams", default=str(UPSTREAMS_CONFIG), help="path to the upstreams file")
     parser.add_argument("--config-out", default=str(CONFIG_OUT), help="path of the gost configuration to write")
+    parser.add_argument("--prowl-egresses-out", help="private named-egress secret to write")
+    parser.add_argument("--prowl-egresses-uid", type=int, help="Prowl container UID that reads the private secret")
+    parser.add_argument("--webview-egress-names-out", help="credential-free rule-name to context-name map")
     parser.add_argument("--rules-dir", default="/rules", help="rules directory inside the hop container")
     parser.add_argument(
         "--rules-local",
@@ -440,6 +486,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.prowl_egresses_out and (args.prowl_egresses_uid is None or args.prowl_egresses_uid < 0):
+        sys.exit("--prowl-egresses-out requires a nonnegative --prowl-egresses-uid")
     upstreams, fallback_name = read_upstreams(pathlib.Path(args.upstreams))
     config = build(upstreams, fallback_name, args.rules_dir)
 
@@ -450,6 +498,14 @@ def main(argv: list[str] | None = None) -> int:
 
     config_out = pathlib.Path(args.config_out)
     write_private_file(config_out, json.dumps(config, indent=2) + "\n")
+    if args.prowl_egresses_out:
+        write_private_file(
+            pathlib.Path(args.prowl_egresses_out),
+            render_prowl_egresses(upstreams),
+            owner_uid=args.prowl_egresses_uid,
+        )
+    if args.webview_egress_names_out:
+        write_route_map(pathlib.Path(args.webview_egress_names_out), render_webview_egress_names(upstreams))
 
     print(f"wrote {config_out} with {len(upstreams)} upstream(s), fallback {fallback_name}")
     return 0

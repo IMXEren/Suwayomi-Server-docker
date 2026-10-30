@@ -37,12 +37,13 @@ OK = prober.ProbeOutcome(status=200, title="Example Domain")
 CHALLENGE = prober.ProbeOutcome(status=403, title="Just a moment...")
 BLOCKED = prober.ProbeOutcome(status=403, title="Attention Required! | Cloudflare")
 BLOCKED_FRENCH = prober.ProbeOutcome(status=403, title="Acc&egrave;s restreint")
+BANNED_IP = prober.ProbeOutcome(status=403, title="Error 1006 - Access denied")
 UNREACHABLE = prober.ProbeOutcome(status=None, error="ProbeError: cannot reach the proxy")
 SERVER_ERROR = prober.ProbeOutcome(status=500, title="Server Error")
 
 DEFAULT_UPSTREAMS = [
-    {"name": "decodo-1", "addr": "isp.decodo.com:10001", "username": "someone", "password": PASSWORD},
-    {"name": "decodo-2", "addr": "isp.decodo.com:10005", "username": "someone", "password": PASSWORD},
+    {"name": "isp-1", "addr": "proxy.example.test:10001", "username": "someone", "password": PASSWORD},
+    {"name": "isp-2", "addr": "proxy.example.test:10005", "username": "someone", "password": PASSWORD},
     {"name": "warp", "addr": "host.docker.internal:40001"},
 ]
 
@@ -100,10 +101,10 @@ class FakeProbe:
 
 class ProbeTargetTests(unittest.TestCase):
     def test_bare_host_defaults_to_https_443(self) -> None:
-        target = prober.ProbeTarget.parse("theblank.net")
-        self.assertEqual((target.host, target.port, target.scheme), ("theblank.net", 443, "https"))
-        self.assertEqual(target.url(), "https://theblank.net/")
-        self.assertEqual(target.entry(), "theblank.net")
+        target = prober.ProbeTarget.parse("sample.example.test")
+        self.assertEqual((target.host, target.port, target.scheme), ("sample.example.test", 443, "https"))
+        self.assertEqual(target.url(), "https://sample.example.test/")
+        self.assertEqual(target.entry(), "sample.example.test")
 
     def test_scheme_and_port_are_honoured(self) -> None:
         target = prober.ProbeTarget.parse("http://example.com:8080")
@@ -136,6 +137,9 @@ class ClassificationTests(unittest.TestCase):
 
     def test_hard_block_is_not_usable(self) -> None:
         self.assertEqual(prober.classify(BLOCKED), prober.Classification(usable=False, label="blocked"))
+
+    def test_cloudflare_1006_is_a_block_not_a_challenge(self) -> None:
+        self.assertEqual(prober.classify(BANNED_IP), prober.Classification(usable=False, label="blocked"))
 
     def test_accented_and_entity_encoded_block_is_recognised(self) -> None:
         plain = prober.ProbeOutcome(status=403, title="Accès restreint")
@@ -206,10 +210,10 @@ class EgressConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = write_config(pathlib.Path(directory))
             egresses = prober.load_egresses(config)
-        self.assertEqual([egress.name for egress in egresses.upstreams], ["decodo-1", "decodo-2", "warp"])
+        self.assertEqual([egress.name for egress in egresses.upstreams], ["isp-1", "isp-2", "warp"])
         self.assertEqual([egress.port for egress in egresses.upstreams], [10001, 10005, 40001])
         self.assertEqual([egress.name for egress in egresses.upstreams if egress.is_fallback], ["warp"])
-        self.assertEqual(egresses.assignable(), ["decodo-1", "decodo-2"])
+        self.assertEqual(egresses.assignable(), ["isp-1", "isp-2"])
 
     def test_preferred_defaults_to_the_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -339,23 +343,59 @@ class ProberRunTests(unittest.TestCase):
     def watch(self, hosts: list[str]) -> None:
         write_rules(self.root, prober.WATCH_FILE_NAME, hosts)
 
+    def ban(self, host: str = "site.example", session: str = "isp-1") -> None:
+        (self.rules_dir / prober.BANNED_EXITS_FILE).write_text(
+            json.dumps({host: {"203.0.113.7": session}}), encoding="utf-8"
+        )
+
     def seed_rule_files(self, assigned: dict[str, list[str]] | None = None) -> None:
         """Create the rule files a deployment already has."""
         assigned = assigned or {}
-        for name in ("decodo-1.txt", "decodo-2.txt"):
+        for name in ("isp-1.txt", "isp-2.txt"):
             write_rule(self.root, name, assigned.get(name, []))
         union_hosts = [host for hosts in assigned.values() for host in hosts]
         (self.rules_dir / prober.union_file_name("warp")).write_text(
             prober.render_union(union_hosts), encoding="utf-8"
         )
 
+    def test_banned_session_is_skipped_and_apex_wildcard_moves_together(self) -> None:
+        self.ban()
+        self.seed_rule_files({"isp-1.txt": ["site.example", "*.site.example"]})
+        self.watch(["site.example"])
+        instance, probe = self.build({("site.example", "warp"): BLOCKED, ("site.example", "isp-2"): OK})
+        report = instance.run()
+        self.assertEqual(report.decisions[0].egress, "isp-2")
+        self.assertNotIn(("site.example", "isp-1"), probe.calls)
+        self.assertIn("\nsite.example\n", read_rule(self.root, "isp-2.txt"))
+        self.assertIn("*.site.example\n", read_rule(self.root, "isp-2.txt"))
+        self.assertNotIn("site.example", read_rule(self.root, "isp-1.txt"))
+
+    def test_banned_current_never_survives_when_no_candidate_is_usable(self) -> None:
+        self.ban()
+        self.seed_rule_files({"isp-1.txt": ["site.example", "*.site.example"]})
+        self.watch(["site.example"])
+        instance, probe = self.build({("site.example", "warp"): BLOCKED, ("site.example", "isp-2"): BLOCKED})
+        decision = instance.run().decisions[0]
+        self.assertEqual(decision.egress, "warp")
+        self.assertIn("moved off banned", decision.action)
+        self.assertNotIn(("site.example", "isp-1"), probe.calls)
+        self.assertNotIn("site.example", read_rule(self.root, "isp-1.txt"))
+        self.assertNotIn("*.site.example", read_rule(self.root, "isp-1.txt"))
+
+    def test_ban_covers_subdomains_without_probing_banned_session(self) -> None:
+        self.ban()
+        self.watch(["reader.site.example"])
+        instance, probe = self.build({("reader.site.example", "warp"): OK})
+        self.assertEqual(instance.run().decisions[0].egress, "warp")
+        self.assertNotIn(("reader.site.example", "isp-1"), probe.calls)
+
     def test_unassigned_host_prefers_the_preferred_candidate(self) -> None:
         self.watch(["a.example"])
         instance, _ = self.build(
             {
                 ("a.example", "warp"): OK,
-                ("a.example", "decodo-1"): OK,
-                ("a.example", "decodo-2"): OK,
+                ("a.example", "isp-1"): OK,
+                ("a.example", "isp-2"): OK,
             }
         )
         report = instance.run()
@@ -363,76 +403,76 @@ class ProberRunTests(unittest.TestCase):
         self.assertEqual(report.decisions[0].label, "ok")
         self.assertFalse(report.decisions[0].changed)
         self.assertEqual(report.changes, 0)
-        for name in ("decodo-1.txt", "decodo-2.txt"):
+        for name in ("isp-1.txt", "isp-2.txt"):
             self.assertNotIn("a.example", read_rule(self.root, name))
 
     def test_a_host_on_paid_recovers_to_the_preferred_candidate(self) -> None:
-        write_rule(self.root, "decodo-1.txt", ["a.example"])
+        write_rule(self.root, "isp-1.txt", ["a.example"])
         self.watch(["a.example"])
         instance, probe = self.build(
             {
                 ("a.example", "warp"): OK,
-                ("a.example", "decodo-1"): CHALLENGE,
+                ("a.example", "isp-1"): CHALLENGE,
             }
         )
         report = instance.run()
         decision = report.decisions[0]
         self.assertEqual((decision.egress, decision.changed), ("warp", True))
-        self.assertIn("moved from decodo-1", decision.action)
+        self.assertIn("moved from isp-1", decision.action)
         # The preferred candidate is probed first, before the egress the host is already on.
         self.assertEqual(probe.calls[0], ("a.example", "warp"))
-        self.assertNotIn("a.example", read_rule(self.root, "decodo-1.txt"))
-        self.assertIn(SENTINEL, read_rule(self.root, "decodo-1.txt"))
+        self.assertNotIn("a.example", read_rule(self.root, "isp-1.txt"))
+        self.assertIn(SENTINEL, read_rule(self.root, "isp-1.txt"))
 
     def test_paid_assignment_is_sticky_while_the_preferred_candidate_is_unusable(self) -> None:
-        self.seed_rule_files({"decodo-1.txt": ["a.example"]})
+        self.seed_rule_files({"isp-1.txt": ["a.example"]})
         self.watch(["a.example"])
         instance, probe = self.build(
             {
                 ("a.example", "warp"): BLOCKED,
-                ("a.example", "decodo-1"): CHALLENGE,
+                ("a.example", "isp-1"): CHALLENGE,
             }
         )
         report = instance.run()
         decision = report.decisions[0]
-        self.assertEqual((decision.egress, decision.changed), ("decodo-1", False))
-        self.assertIn("kept on decodo-1", decision.action)
+        self.assertEqual((decision.egress, decision.changed), ("isp-1", False))
+        self.assertIn("kept on isp-1", decision.action)
         # Preferred first, then the current paid egress.
-        self.assertEqual(probe.calls[:2], [("a.example", "warp"), ("a.example", "decodo-1")])
+        self.assertEqual(probe.calls[:2], [("a.example", "warp"), ("a.example", "isp-1")])
         self.assertEqual(report.written, [])
 
     def test_a_broken_assignment_moves_to_the_preferred_working_egress(self) -> None:
-        write_rule(self.root, "decodo-1.txt", ["a.example"])
+        write_rule(self.root, "isp-1.txt", ["a.example"])
         self.watch(["a.example"])
         instance, _ = self.build(
             {
-                ("a.example", "decodo-1"): BLOCKED,
+                ("a.example", "isp-1"): BLOCKED,
                 ("a.example", "warp"): OK,
-                ("a.example", "decodo-2"): OK,
+                ("a.example", "isp-2"): OK,
             }
         )
         report = instance.run()
         decision = report.decisions[0]
         self.assertEqual((decision.egress, decision.label, decision.changed), ("warp", "ok", True))
-        self.assertIn("moved from decodo-1", decision.action)
-        self.assertNotIn("a.example", read_rule(self.root, "decodo-1.txt"))
-        self.assertIn(SENTINEL, read_rule(self.root, "decodo-1.txt"))
+        self.assertIn("moved from isp-1", decision.action)
+        self.assertNotIn("a.example", read_rule(self.root, "isp-1.txt"))
+        self.assertIn(SENTINEL, read_rule(self.root, "isp-1.txt"))
 
     def test_a_broken_assignment_falls_through_to_the_next_upstream(self) -> None:
-        write_rule(self.root, "decodo-1.txt", ["a.example"])
+        write_rule(self.root, "isp-1.txt", ["a.example"])
         self.watch(["a.example"])
         instance, _ = self.build(
             {
-                ("a.example", "decodo-1"): BLOCKED,
+                ("a.example", "isp-1"): BLOCKED,
                 ("a.example", "warp"): BLOCKED,
-                ("a.example", "decodo-2"): CHALLENGE,
+                ("a.example", "isp-2"): CHALLENGE,
             }
         )
         report = instance.run()
-        self.assertEqual(report.decisions[0].egress, "decodo-2")
+        self.assertEqual(report.decisions[0].egress, "isp-2")
         self.assertTrue(report.decisions[0].changed)
-        self.assertIn("a.example", read_rule(self.root, "decodo-2.txt"))
-        self.assertIn(SENTINEL, read_rule(self.root, "decodo-1.txt"))
+        self.assertIn("a.example", read_rule(self.root, "isp-2.txt"))
+        self.assertIn(SENTINEL, read_rule(self.root, "isp-1.txt"))
 
     def test_a_transport_failure_is_reported_with_its_reason(self) -> None:
         self.watch(["a.example"])
@@ -450,33 +490,33 @@ class ProberRunTests(unittest.TestCase):
         self.assertEqual(len(prober.shorten("x" * 200)), 100)
 
     def test_no_usable_egress_leaves_the_assignment_alone(self) -> None:
-        self.seed_rule_files({"decodo-1.txt": ["a.example"]})
+        self.seed_rule_files({"isp-1.txt": ["a.example"]})
         self.watch(["a.example"])
         instance, _ = self.build(
             {
-                ("a.example", "decodo-1"): BLOCKED,
+                ("a.example", "isp-1"): BLOCKED,
                 ("a.example", "warp"): BLOCKED,
-                ("a.example", "decodo-2"): UNREACHABLE,
+                ("a.example", "isp-2"): UNREACHABLE,
             }
         )
         report = instance.run()
         decision = report.decisions[0]
-        self.assertEqual(decision.egress, "decodo-1")
+        self.assertEqual(decision.egress, "isp-1")
         self.assertEqual(decision.label, "blocked")
         self.assertFalse(decision.changed)
         self.assertIn("no usable egress", decision.action)
-        self.assertIn("a.example", read_rule(self.root, "decodo-1.txt"))
+        self.assertIn("a.example", read_rule(self.root, "isp-1.txt"))
         self.assertEqual(report.written, [])
 
     def test_union_is_written_from_the_assignments(self) -> None:
-        write_rule(self.root, "decodo-1.txt", [])
+        write_rule(self.root, "isp-1.txt", [])
         self.watch(["a.example", "b.example"])
         instance, _ = self.build(
             {
                 ("a.example", "warp"): BLOCKED,
-                ("a.example", "decodo-1"): CHALLENGE,
+                ("a.example", "isp-1"): CHALLENGE,
                 ("b.example", "warp"): BLOCKED,
-                ("b.example", "decodo-1"): OK,
+                ("b.example", "isp-1"): OK,
             }
         )
         instance.run()
@@ -486,12 +526,12 @@ class ProberRunTests(unittest.TestCase):
 
     def test_union_carries_the_direct_hosts_and_drops_the_sentinel(self) -> None:
         write_rules(self.root, prober.DIRECT_RULE_FILE, ["github.test"])
-        write_rule(self.root, "decodo-1.txt", [])
+        write_rule(self.root, "isp-1.txt", [])
         self.watch(["a.example"])
         instance, _ = self.build(
             {
                 ("a.example", "warp"): BLOCKED,
-                ("a.example", "decodo-1"): CHALLENGE,
+                ("a.example", "isp-1"): CHALLENGE,
             }
         )
         instance.run()
@@ -504,44 +544,44 @@ class ProberRunTests(unittest.TestCase):
         instance, probe = self.build(
             {
                 ("github.test", "warp"): BLOCKED,
-                ("github.test", "decodo-1"): CHALLENGE,
+                ("github.test", "isp-1"): CHALLENGE,
                 ("a.example", "warp"): OK,
             }
         )
         report = instance.run()
         self.assertEqual([decision.host for decision in report.decisions], ["a.example"])
         self.assertNotIn("github.test", {host for host, _ in probe.calls})
-        for name in ("decodo-1.txt", "decodo-2.txt"):
+        for name in ("isp-1.txt", "isp-2.txt"):
             self.assertNotIn("github.test", read_rule(self.root, name))
         self.assertIn("github.test", read_rule(self.root, prober.union_file_name("warp")))
 
     def test_a_duplicate_entry_lands_in_one_file_only(self) -> None:
-        write_rule(self.root, "decodo-1.txt", ["dup.example"])
-        write_rule(self.root, "decodo-2.txt", ["dup.example"])
+        write_rule(self.root, "isp-1.txt", ["dup.example"])
+        write_rule(self.root, "isp-2.txt", ["dup.example"])
         instance, _ = self.build(
             {
                 ("dup.example", "warp"): BLOCKED,
-                ("dup.example", "decodo-1"): CHALLENGE,
-                ("dup.example", "decodo-2"): OK,
+                ("dup.example", "isp-1"): CHALLENGE,
+                ("dup.example", "isp-2"): OK,
             }
         )
         report = instance.run()
-        # The rule files already recorded it under decodo-1 (first file wins) and the preferred
-        # upstream cannot serve it, so it stays there and decodo-2 becomes inert.
-        self.assertEqual(report.decisions[0].egress, "decodo-1")
-        self.assertIn("dup.example", read_rule(self.root, "decodo-1.txt"))
-        self.assertNotIn("dup.example", read_rule(self.root, "decodo-2.txt"))
-        self.assertIn(SENTINEL, read_rule(self.root, "decodo-2.txt"))
+        # The rule files already recorded it under isp-1 (first file wins) and the preferred
+        # upstream cannot serve it, so it stays there and isp-2 becomes inert.
+        self.assertEqual(report.decisions[0].egress, "isp-1")
+        self.assertIn("dup.example", read_rule(self.root, "isp-1.txt"))
+        self.assertNotIn("dup.example", read_rule(self.root, "isp-2.txt"))
+        self.assertIn(SENTINEL, read_rule(self.root, "isp-2.txt"))
         self.assertNotIn(SENTINEL, read_rule(self.root, prober.union_file_name("warp")))
 
     def test_a_wildcard_in_one_file_refuses_a_concrete_host_from_another(self) -> None:
-        # decodo-1 holds *.example.com while the watched foo.example.com would move onto the
-        # preferred decodo-2. The pair can match the same host, so the write is refused before any
+        # isp-1 holds *.example.com while the watched foo.example.com would move onto the
+        # preferred isp-2. The pair can match the same host, so the write is refused before any
         # file is touched rather than published for gost to hot-reload.
-        write_rule(self.root, "decodo-1.txt", ["*.example.com"])
-        write_config(self.root, preferred="decodo-2")
+        write_rule(self.root, "isp-1.txt", ["*.example.com"])
+        write_config(self.root, preferred="isp-2")
         self.watch(["foo.example.com"])
-        instance, _ = self.build({("foo.example.com", "decodo-2"): OK})
+        instance, _ = self.build({("foo.example.com", "isp-2"): OK})
         before = {path.name: path.read_text(encoding="utf-8") for path in self.rules_dir.iterdir()}
         with self.assertRaises(SystemExit) as caught:
             instance.run()
@@ -550,22 +590,22 @@ class ProberRunTests(unittest.TestCase):
         self.assertIn("*.example.com", message)
         after = {path.name: path.read_text(encoding="utf-8") for path in self.rules_dir.iterdir()}
         self.assertEqual(before, after)
-        self.assertFalse((self.rules_dir / "decodo-2.txt").exists())
+        self.assertFalse((self.rules_dir / "isp-2.txt").exists())
         self.assertFalse((self.rules_dir / prober.union_file_name("warp")).exists())
 
     def test_an_apex_and_its_wildcard_in_different_files_still_write(self) -> None:
-        write_rule(self.root, "decodo-1.txt", ["*.example.com"])
-        write_rule(self.root, "decodo-2.txt", ["example.com"])
+        write_rule(self.root, "isp-1.txt", ["*.example.com"])
+        write_rule(self.root, "isp-2.txt", ["example.com"])
         instance, _ = self.build({})
         report = instance.run()
         self.assertFalse(report.dry_run)
-        self.assertIn("*.example.com", read_rule(self.root, "decodo-1.txt"))
-        self.assertIn("example.com", read_rule(self.root, "decodo-2.txt"))
+        self.assertIn("*.example.com", read_rule(self.root, "isp-1.txt"))
+        self.assertIn("example.com", read_rule(self.root, "isp-2.txt"))
 
     def test_unchanged_files_are_not_rewritten(self) -> None:
-        self.seed_rule_files({"decodo-1.txt": ["a.example"]})
+        self.seed_rule_files({"isp-1.txt": ["a.example"]})
         self.watch(["a.example"])
-        table = {("a.example", "warp"): BLOCKED, ("a.example", "decodo-1"): CHALLENGE}
+        table = {("a.example", "warp"): BLOCKED, ("a.example", "isp-1"): CHALLENGE}
         first, _ = self.build(table)
         first_report = first.run()
         self.assertEqual(first_report.written, [])
@@ -588,13 +628,13 @@ class ProberRunTests(unittest.TestCase):
         instance, _ = self.build(
             {
                 ("a.example", "warp"): BLOCKED,
-                ("a.example", "decodo-1"): CHALLENGE,
+                ("a.example", "isp-1"): CHALLENGE,
             }
         )
         report = instance.run(dry_run=True)
         self.assertTrue(report.dry_run)
         self.assertEqual(report.written, [])
-        self.assertEqual(report.decisions[0].egress, "decodo-1")
+        self.assertEqual(report.decisions[0].egress, "isp-1")
         self.assertEqual(
             sorted(path.name for path in self.rules_dir.iterdir()),
             [prober.DIRECT_RULE_FILE, prober.WATCH_FILE_NAME],
@@ -614,10 +654,10 @@ class ProberRunTests(unittest.TestCase):
         # A wildcard in one file and a concrete host the prober would move onto another can match
         # the same host, so a real run refuses the write. A dry run validates the same plan, so it
         # must refuse too rather than report success for a mapping a real run aborts.
-        write_rule(self.root, "decodo-1.txt", ["*.example.com"])
-        write_config(self.root, preferred="decodo-2")
+        write_rule(self.root, "isp-1.txt", ["*.example.com"])
+        write_config(self.root, preferred="isp-2")
         self.watch(["foo.example.com"])
-        instance, _ = self.build({("foo.example.com", "decodo-2"): OK})
+        instance, _ = self.build({("foo.example.com", "isp-2"): OK})
         before = {path.name: path.read_text(encoding="utf-8") for path in self.rules_dir.iterdir()}
         with self.assertRaises(SystemExit) as caught:
             instance.run(dry_run=True)
@@ -626,7 +666,7 @@ class ProberRunTests(unittest.TestCase):
         self.assertIn("*.example.com", message)
         after = {path.name: path.read_text(encoding="utf-8") for path in self.rules_dir.iterdir()}
         self.assertEqual(before, after)
-        self.assertFalse((self.rules_dir / "decodo-2.txt").exists())
+        self.assertFalse((self.rules_dir / "isp-2.txt").exists())
         self.assertFalse((self.rules_dir / prober.union_file_name("warp")).exists())
 
     def test_only_host_limits_the_probes(self) -> None:
@@ -643,27 +683,27 @@ class ProberRunTests(unittest.TestCase):
         self.assertEqual(report.watched_but_not_probed, [])
 
     def test_assigned_hosts_are_watched_even_when_not_listed(self) -> None:
-        write_rule(self.root, "decodo-2.txt", ["assigned.example"])
+        write_rule(self.root, "isp-2.txt", ["assigned.example"])
         instance, probe = self.build(
             {
                 ("assigned.example", "warp"): BLOCKED,
-                ("assigned.example", "decodo-2"): CHALLENGE,
+                ("assigned.example", "isp-2"): CHALLENGE,
             }
         )
         report = instance.run()
         self.assertEqual([decision.host for decision in report.decisions], ["assigned.example"])
-        self.assertEqual(report.decisions[0].egress, "decodo-2")
-        self.assertIn(("assigned.example", "decodo-2"), probe.calls)
+        self.assertEqual(report.decisions[0].egress, "isp-2")
+        self.assertIn(("assigned.example", "isp-2"), probe.calls)
 
     def test_an_assigned_wildcard_is_preserved_and_not_probed(self) -> None:
-        write_rule(self.root, "decodo-1.txt", ["*.wild.example", "plain.example"])
+        write_rule(self.root, "isp-1.txt", ["*.wild.example", "plain.example"])
         self.watch(["plain.example"])
         instance, probe = self.build(
-            {("plain.example", "warp"): BLOCKED, ("plain.example", "decodo-1"): CHALLENGE}
+            {("plain.example", "warp"): BLOCKED, ("plain.example", "isp-1"): CHALLENGE}
         )
         report = instance.run()
         self.assertEqual({host for host, _ in probe.calls}, {"plain.example"})
-        content = read_rule(self.root, "decodo-1.txt")
+        content = read_rule(self.root, "isp-1.txt")
         self.assertIn("*.wild.example", content)
         self.assertIn("plain.example", content)
         self.assertIn("*.wild.example", read_rule(self.root, prober.union_file_name("warp")))
@@ -685,27 +725,27 @@ class ProberRunTests(unittest.TestCase):
             instance.run()
 
     def test_a_narrowed_run_leaves_other_assignments_alone(self) -> None:
-        write_rule(self.root, "decodo-1.txt", ["kept.example", "looked.example"])
+        write_rule(self.root, "isp-1.txt", ["kept.example", "looked.example"])
         instance, probe = self.build(
             {
-                ("kept.example", "decodo-1"): CHALLENGE,
+                ("kept.example", "isp-1"): CHALLENGE,
                 ("looked.example", "warp"): BLOCKED,
-                ("looked.example", "decodo-1"): BLOCKED,
-                ("looked.example", "decodo-2"): OK,
+                ("looked.example", "isp-1"): BLOCKED,
+                ("looked.example", "isp-2"): OK,
             }
         )
         report = instance.run(only_host="looked.example")
         self.assertEqual([decision.host for decision in report.decisions], ["looked.example"])
         self.assertEqual({host for host, _ in probe.calls}, {"looked.example"})
-        content = read_rule(self.root, "decodo-1.txt")
+        content = read_rule(self.root, "isp-1.txt")
         self.assertIn("kept.example", content)
         self.assertNotIn("looked.example", content)
 
     def test_watch_file_entry_wins_over_the_rule_file_form(self) -> None:
-        write_rule(self.root, "decodo-1.txt", ["a.example"])
+        write_rule(self.root, "isp-1.txt", ["a.example"])
         self.watch(["http://a.example"])
         instance, probe = self.build(
-            {("a.example", "warp"): BLOCKED, ("a.example", "decodo-1"): CHALLENGE}
+            {("a.example", "warp"): BLOCKED, ("a.example", "isp-1"): CHALLENGE}
         )
         report = instance.run()
         self.assertEqual(len(probe.calls), 2)
@@ -723,7 +763,7 @@ class ProberRunTests(unittest.TestCase):
         report = instance.run()
         self.assertEqual([decision.host for decision in report.decisions], ["other.example"])
         self.assertNotIn("raw.githubusercontent.com", {host for host, _ in probe.calls})
-        for name in ("decodo-1.txt", "decodo-2.txt"):
+        for name in ("isp-1.txt", "isp-2.txt"):
             self.assertNotIn("raw.githubusercontent.com", read_rule(self.root, name))
         union = read_rule(self.root, prober.union_file_name("warp"))
         self.assertIn("*.githubusercontent.com", union)
@@ -745,7 +785,7 @@ class ProberRunTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             instance.run()
         self.assertEqual(probe.calls, [])
-        self.assertFalse((self.rules_dir / "decodo-1.txt").exists())
+        self.assertFalse((self.rules_dir / "isp-1.txt").exists())
 
     def test_an_intentionally_empty_watch_list_is_still_valid(self) -> None:
         self.watch([])
@@ -764,8 +804,8 @@ class ProberRunTests(unittest.TestCase):
 class ReportTests(unittest.TestCase):
     def test_report_never_contains_a_credential(self) -> None:
         report = prober.Report(
-            egresses=["warp (host.docker.internal:40001)", "decodo-1 (isp.decodo.com:10001)"],
-            decisions=[prober.Decision("a.example", "decodo-1", "challenge", False, "kept on decodo-1")],
+            egresses=["warp (host.docker.internal:40001)", "isp-1 (proxy.example.test:10001)"],
+            decisions=[prober.Decision("a.example", "isp-1", "challenge", False, "kept on isp-1")],
             watched_but_not_probed=["*.wild.example"],
             written=[],
             unchanged=[],
@@ -782,7 +822,7 @@ class ReportTests(unittest.TestCase):
         report = prober.Report(
             egresses=["warp"],
             decisions=[
-                prober.Decision("a.example", "warp", "ok", True, "moved from decodo-1"),
+                prober.Decision("a.example", "warp", "ok", True, "moved from isp-1"),
                 prober.Decision("b.example", "warp", "ok", False, "kept on warp"),
             ],
             watched_but_not_probed=[],

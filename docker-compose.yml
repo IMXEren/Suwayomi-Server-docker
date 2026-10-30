@@ -103,9 +103,8 @@ services:
       - WEB_UI_FLAVOR=${WEB_UI_FLAVOR:-Custom}
       - WEB_UI_CHANNEL=${WEB_UI_CHANNEL:-BUNDLED}
       - WEB_UI_UPDATE_INTERVAL=${WEB_UI_UPDATE_INTERVAL:-0}
-      # The embedded Chromium (KCEF). It is not initialized while WEB_VIEW_PROVIDER selects the
-      # external browser (the default below); only the CEF path needs this service's raised
-      # shm_size, because the 64 MiB container default makes the renderer crash.
+      # KCEF backs extension-created Android WebViews even when the user-facing WebView
+      # selects Prowl. Keep the raised shm_size for the renderer.
       - KCEF_ENABLED=${KCEF_ENABLED:-true}
       - MAX_SOURCES_IN_PARALLEL=${MAX_SOURCES_IN_PARALLEL:-4}
       # Only the embedded Chromium (WebView) honours these; the JVM ignores proxy variables.
@@ -125,8 +124,9 @@ services:
       # served through the authenticated VNC proxy on this origin.
       - WEB_VIEW_PROVIDER=${WEB_VIEW_PROVIDER:-PROWL_VNC}
       - WEB_VIEW_VNC_URL=${WEB_VIEW_VNC_URL:-http://vnc:6080}
-      # Source requests and the embedded WebView both egress through the hop, which
-      # selects an upstream per destination host. It must match PROWL_PROXY_URL below.
+      - WEB_VIEW_EGRESS_RULES_DIR=/webview-egress-rules
+      # Source requests and extension WebViews use the host-routing hop; named Prowl
+      # contexts use the same assigned upstream directly.
       - SOCKS_PROXY_ENABLED=${SOCKS_PROXY_ENABLED:-true}
       - SOCKS_PROXY_VERSION=5
       - SOCKS_PROXY_HOST=${SOCKS_PROXY_HOST:-egress-hop}
@@ -136,6 +136,7 @@ services:
       - ${DATA_HOST_PATH:-./data}:/home/suwayomi/.local/share/Tachidesk
       # The archive view is the rclone sidecar's mount, reached through the shared host path.
       - ${ARCHIVE_HOST_PATH:-/srv/suwayomi/archive}:/archive:rshared
+      - ./egress-rules:/webview-egress-rules:ro
     # Reachable only through the host reverse proxy / tunnel, never directly.
     ports:
       - "127.0.0.1:4567:4567"
@@ -149,8 +150,8 @@ services:
       - rclone.conf
       - auth_password
 
-  # Per-host egress switch. Source requests and the embedded WebView reach it through the app's
-  # SOCKS setting, and Prowl reaches it through PROWL_PROXY_URL. It picks a named upstream by
+  # Per-host egress switch. Source requests and extension WebViews reach it through the app's
+  # SOCKS setting, and Prowl's default context uses it through PROWL_PROXY_URL. It picks an upstream by
   # destination host: the one whose rule file in egress-rules lists the host, and the configured
   # fallback for everything else. Its configuration holds proxy credentials, so it lives in
   # ./secrets and never in this file.
@@ -176,21 +177,17 @@ services:
     image: python:3.12-alpine
     container_name: egress-prober
     restart: unless-stopped
-    command: >-
-      sh -c 'while true; do
-        python /app/egress-prober.py || true;
-        sleep ${EGRESS_PROBER_INTERVAL_SECONDS:-3600};
-      done'
+    command: [python, -u, /app/egress-prober-loop.py, "${EGRESS_PROBER_INTERVAL_SECONDS:-3600}"]
     volumes:
       - ./secrets/egress-upstreams.json:/secrets/egress-upstreams.json:ro
       - ./egress-rules:/egress-rules
       - ./scripts/egress-prober.py:/app/egress-prober.py:ro
+      - ./scripts/egress-prober-loop.py:/app/egress-prober-loop.py:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
-  # Browser service that solves Cloudflare challenges for the app's FlareSolverr-compatible
-  # client. It owns a persistent trust profile and egresses through the same per-host
-  # routing hop as the app, so clearance cookies are acquired from the app's exit IP.
+  # Browser service for the app's FlareSolverr-compatible client and user-facing WebViews.
+  # Its default profile uses the routing hop; named proxy-bound contexts retain separate cookies.
   prowl:
     image: ${PROWL_IMAGE:-prowl:local}
     restart: unless-stopped
@@ -208,6 +205,9 @@ services:
       - PROWL_WINDOW_SIZE=${PROWL_WINDOW_SIZE:-1600x900}
       - PROWL_PROFILE_DIR=/state/profile
       - PROWL_PROFILE_ARCHIVE=/state/browser-profile.zip
+      - PROWL_EGRESS_BOUNDARY=context
+      - PROWL_EGRESSES_FILE=/run/secrets/prowl_egresses
+      - PROWL_SESSION_STATE_DIR=/state/sessions
       # A few concurrent loads, so an interactive WebView does not starve the app's own solves.
       - PROWL_MAX_CONCURRENCY=${PROWL_MAX_CONCURRENCY:-6}
       # Interactive tabs are reaped after this long with no activity. The app polls the tab list
@@ -224,7 +224,7 @@ services:
       # makes its startup hang rather than fail (60s with no debugging port, against 1.1s from a
       # writable copy of the same extension).
       - PROWL_EXTENSIONS_DIR=/extensions
-      # Chromium --proxy-server. The host address is blocked by Cloudflare, the WARP one is not.
+      # The default context uses the routing hop; named contexts use the private secret.
       - PROWL_PROXY_URL=socks5://${SOCKS_PROXY_HOST:-egress-hop}:${SOCKS_PROXY_PORT:-1080}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -233,6 +233,8 @@ services:
     volumes:
       - prowl-state:/state
       - ./extensions:/extensions
+    secrets:
+      - prowl_egresses
     # Chromium allocates from /dev/shm. Measured on this host, 512m is ample: the browser
     # uses none of it for ordinary navigation or challenge solving.
     shm_size: ${PROWL_SHM_SIZE:-512m}
@@ -356,3 +358,5 @@ secrets:
     file: ./secrets/rclone.conf
   auth_password:
     file: ./secrets/auth_password
+  prowl_egresses:
+    file: ./secrets/prowl_egresses

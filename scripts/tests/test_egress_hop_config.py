@@ -463,6 +463,52 @@ class WildcardAgreementTests(unittest.TestCase):
 
 
 class PrivateWriteTests(unittest.TestCase):
+    def test_named_contexts_use_the_same_upstreams_without_printing_credentials(self) -> None:
+        upstreams = [
+            hop.Upstream("first", "proxy.example.test", 10001, "user:name", "private@key"),
+            hop.Upstream("fallback", "host.docker.internal", 40001),
+        ]
+        spec = hop.render_prowl_egresses(upstreams)
+        names = hop.render_webview_egress_names(upstreams)
+        aliases = json.loads(names)
+        self.assertEqual(set(aliases), {"first", "fallback"})
+        self.assertTrue(all(name.startswith("exit-") for name in aliases.values()))
+        self.assertNotEqual(aliases["first"], aliases["fallback"])
+        self.assertEqual(
+            spec,
+            f"{aliases['first']}=socks5://user%3Aname:private%40key@proxy.example.test:10001,"
+            f"{aliases['fallback']}=socks5://host.docker.internal:40001\n",
+        )
+        self.assertEqual(json.loads(hop.render_webview_egress_names(list(reversed(upstreams)))), aliases)
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "prowl_egresses"
+            modes = self._capture_open_modes(lambda: hop.write_private_file(path, spec))
+            self.assertEqual(modes, [0o600])
+            public = pathlib.Path(directory) / "webview-egress-names.json"
+            hop.write_route_map(public, names)
+            self.assertEqual(json.loads(public.read_text()), aliases)
+
+    def test_generated_prowl_secret_is_owned_by_its_container_uid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "prowl_egresses"
+            with unittest.mock.patch.object(hop.os, "chown", create=True) as chown:
+                modes = self._capture_open_modes(lambda: hop.write_private_file(path, "exit-01=socks5://proxy.example.test:1080\n", owner_uid=10001))
+            self.assertEqual(modes, [0o600])
+            chown.assert_called_once()
+            self.assertEqual(chown.call_args.args[1:], (10001, 10001))
+
+    def test_prowl_uid_is_required_before_any_config_is_written(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory)
+            with self.assertRaises(SystemExit):
+                hop.main([
+                    "--prowl-egresses-out", str(path / "prowl_egresses"),
+                    "--rules-local", str(path / "rules"),
+                    "--config-out", str(path / "egress-hop.json"),
+                ])
+            self.assertFalse((path / "egress-hop.json").exists())
+            self.assertFalse((path / "rules").exists())
+
     def test_the_config_is_created_with_private_mode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "egress-hop.json"

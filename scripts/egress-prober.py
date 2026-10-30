@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import html
+import ipaddress
 import json
 import pathlib
 import re
@@ -59,6 +60,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO / "secrets" / "egress-upstreams.json"
 RULES_DIR = REPO / "egress-rules"
 WATCH_FILE_NAME = "egress-watch.txt"
+BANNED_EXITS_FILE = "banned-exits.json"
 
 #: Rule file holding the direct egress's hosts, matching scripts/egress-hop-config.py. Its entries
 #: join the union so the fallback cannot also be eligible for them, but the file is never rewritten
@@ -94,7 +96,7 @@ def union_file_name(fallback_name: str) -> str:
     return f"{fallback_name}-exclude.txt"
 
 #: Body titles that mean the request was refused outright and a browser cannot help.
-BLOCK_MARKERS = ("attention required", "acces restreint")
+BLOCK_MARKERS = ("attention required", "acces restreint", "access denied", "error 1006")
 
 #: Body titles that mean a challenge a real browser can solve.
 CHALLENGE_MARKERS = ("just a moment",)
@@ -292,6 +294,30 @@ def extract_status(response_text: str) -> int | None:
     """Return the status code of the first response line, or ``None``."""
     match = _STATUS_PATTERN.match(response_text)
     return int(match.group(1)) if match else None
+
+
+def load_banned_exits(path: pathlib.Path, names: set[str]) -> dict[str, set[str]]:
+    """Map a site and its subdomains to excluded, IP-identified sticky sessions."""
+    if not path.exists():
+        return {}
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path} must map hosts to banned IP/session pairs")
+    bans: dict[str, set[str]] = {}
+    for host, exits in raw.items():
+        if not isinstance(host, str) or not _HOST_PATTERN.fullmatch(host) or host != host.lower():
+            raise ValueError(f"invalid banned-exit host in {path}")
+        if not isinstance(exits, dict) or not exits:
+            raise ValueError(f"{path}: {host} needs banned IP/session pairs")
+        for address, name in exits.items():
+            try:
+                ipaddress.ip_address(address)
+            except ValueError as error:
+                raise ValueError(f"{path}: invalid banned exit IP for {host}") from error
+            if not isinstance(name, str) or name not in names:
+                raise ValueError(f"{path}: unknown banned exit session for {host}")
+            bans.setdefault(host, set()).add(name)
+    return bans
 
 
 def classify(outcome: ProbeOutcome) -> Classification:
@@ -690,6 +716,7 @@ class EgressProber:
         config = load_egresses(self._config_path)
         upstream_names = config.assignable()
         assignments = self._read_assignments(upstream_names)
+        banned_exits = load_banned_exits(self._rules_dir / BANNED_EXITS_FILE, {e.name for e in config.upstreams})
         watch_entries, watch_skipped = self._read_watch_entries()
 
         # The watch list wins over the rule files, so an explicit entry there decides how a host
@@ -723,7 +750,7 @@ class EgressProber:
             watch_skipped = [entry for entry in watch_skipped if entry == only_host]
 
         decisions = [
-            self._decide(target, config, assignments)
+            self._decide(target, config, assignments, banned_exits)
             for target in sorted(targets.values(), key=lambda entry: entry.host)
         ]
 
@@ -841,12 +868,19 @@ class EgressProber:
         target: ProbeTarget,
         config: Egresses,
         assignments: Mapping[str, str],
+        banned_exits: Mapping[str, set[str]],
     ) -> Decision:
         """Probe *target* in preference order and decide where it should sit."""
         current = assignments.get(target.host, config.fallback)
+        banned = set().union(
+            *(sessions for host, sessions in banned_exits.items() if target.host == host or target.host.endswith(f".{host}"))
+        )
+        eligible = [egress for egress in self._probe_order(current, config) if egress.name not in banned]
+        if not eligible:
+            raise ValueError(f"no unbanned exit for {target.host}")
         labels: dict[str, str] = {}
         errors: dict[str, str] = {}
-        for egress in self._probe_order(current, config):
+        for egress in eligible:
             outcome = self._probe(target, egress)
             classification = classify(outcome)
             labels[egress.name] = classification.label
@@ -863,6 +897,16 @@ class EgressProber:
                     action=action,
                     entry=target.entry(),
                 )
+        if current in banned:
+            replacement = next((egress.name for egress in eligible if egress.is_fallback), eligible[0].name)
+            return Decision(
+                host=target.host,
+                egress=replacement,
+                label=labels.get(replacement, "unusable"),
+                changed=True,
+                action=f"no usable egress, moved off banned {current}",
+                entry=target.entry(),
+            )
         label = labels.get(current, "unusable")
         detail = errors.get(current) or next(iter(errors.values()), "")
         return Decision(
@@ -889,6 +933,12 @@ class EgressProber:
         that already holds an entry keeps it.
         """
         decided = {decision.host for decision in decisions}
+        wildcards = {
+            entry
+            for name in upstream_names
+            for entry in self._rule_entries(name)
+            if entry.startswith("*.")
+        }
         claimed: set[str] = set()
         hosts_by_egress: dict[str, set[str]] = {name: set() for name in upstream_names}
 
@@ -903,10 +953,14 @@ class EgressProber:
                 continue
             hosts_by_egress[decision.egress].add(entry)
             claimed.add(key)
+            wildcard = f"*.{decision.host}"
+            if wildcard in wildcards and not claimed_by_direct(wildcard, direct_entries):
+                hosts_by_egress[decision.egress].add(wildcard)
+                claimed.add(entry_key(wildcard))
 
         for name in upstream_names:
             for entry_text in self._rule_entries(name):
-                if entry_text == SENTINEL:
+                if entry_text == SENTINEL or (entry_text.startswith("*.") and entry_text[2:] in decided):
                     continue
                 if claimed_by_direct(entry_text, direct_entries):
                     continue
