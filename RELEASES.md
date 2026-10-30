@@ -1,3 +1,13 @@
+## [0.1.0-dev.10](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.9...v0.1.0-dev.10) (2026-10-30)
+
+### Features
+
+* **egress:** align template with context routing and guarded probing ([4f7d1f5](https://github.com/IMXEren/Suwayomi-Server-docker/commit/4f7d1f5cc8da7d34409f72ef154d005124f92c1e))
+
+### Bug Fixes
+
+* **stack:** supervise x11vnc and health-check the RFB handshake ([2064947](https://github.com/IMXEren/Suwayomi-Server-docker/commit/20649475d3dbcbd06f40669299c0fd6c62371c3b))
+
 ## [0.1.0-dev.9](https://github.com/IMXEren/Suwayomi-Server-docker/compare/v0.1.0-dev.8...v0.1.0-dev.9) (2026-09-26)
 
 ### Features
