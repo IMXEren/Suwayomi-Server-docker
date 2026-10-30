@@ -116,19 +116,21 @@ Compose project at boot.
    cp secrets/egress-upstreams.json.example secrets/egress-upstreams.json
    # edit secrets/egress-upstreams.json: the named SOCKS5 upstreams, `fallback` and `preferred`
    chmod 600 secrets/egress-upstreams.json
-   sudo python3 scripts/egress-hop-config.py
+   sudo python3 scripts/egress-hop-config.py \
+     --prowl-egresses-out secrets/prowl_egresses --prowl-egresses-uid 10001 \
+     --webview-egress-names-out egress-rules/webview-egress-names.json
    ```
 
    The upstreams are arbitrary named SOCKS5 endpoints (any provider, with or without credentials);
    the optional WARP bridge is just another upstream at `host.docker.internal:40001`.
-   `secrets/README.md` gives the exact shape. That command writes `secrets/egress-hop.json`
-   (mounted read-only by the hop) and seeds the `egress-rules/` files; `egress-prober` reads the
-   authored `secrets/egress-upstreams.json` directly. Changing the upstreams later is not a plain
-   re-run: follow "Changing the upstreams config" below.
+   `secrets/README.md` gives the exact shape. That command writes `secrets/egress-hop.json`,
+   the private Prowl secret (owned by its container UID), and a credential-free context alias map
+   readable by Suwayomi; it also seeds `egress-rules/`. Keep both secrets and rule files
+   untracked in this generic repository. Changing upstreams later requires a staged cutover.
 
-3. Build Prowl from its source at `v1.2.0-dev.1` or later (the first release with the
-   interactive browser API) as `prowl:local` before starting Compose. This template does not
-   supply an image; `v1.1.0` lacks the `browser.open`/`cookies.list` commands used here.
+3. Build Prowl from its source at `v2.0.0-dev.13` or later (context-bound egress and mounted
+   named-egress secret support) as `prowl:local` before starting Compose. This generic template
+   does not require access to Prowl's private registry.
    Follow Prowl's Dockerfile for any optional private-font build context. An image already
    built from compatible source can be reused; it is not part of this repository.
 
@@ -243,9 +245,9 @@ docker compose exec suwayomi sh -lc \
 
 Expect `server.archivePath = "/archive"`, `server.authMode = UI_LOGIN`,
 `server.webUIFlavor = Custom`, `server.webUIChannel = BUNDLED`,
-`server.flareSolverrEnabled = true` and `server.kcefEnabled = true`. The setting stays on, but the
-embedded browser is not initialized while `WEB_VIEW_PROVIDER=PROWL_VNC`: the startup script maps
-that onto `server.webViewProvider`, and the external provider serves the WebView instead.
+`server.flareSolverrEnabled = true` and `server.kcefEnabled = true`. CEF remains initialized for
+extensions that create Android WebViews; `WEB_VIEW_PROVIDER=PROWL_VNC` selects Prowl for the
+user-facing WebView.
 
 A permissions mistake here is easy to make and fails at runtime only: the app runs as
 uid 1000, so a `root:root 0400` secret is readable by the sidecar but **not** by the app,
@@ -260,24 +262,26 @@ and the configured fallback (the optional WARP bridge when it is the fallback) f
 else. A host in `egress-rules/direct-hosts.txt` leaves from this host itself and traverses no
 upstream; that file is policy, edited by hand, and the generator only seeds it when it is missing.
 
-The point is parity. A Cloudflare clearance is bound to the IP that solved it, so the app and the
-solver must leave from the same address for a given site. Both are configured from the same two
-variables, `SOCKS_PROXY_HOST` and `SOCKS_PROXY_PORT`, so they cannot drift apart:
+The point is parity: Cloudflare clearance is bound to the exit IP. The app's source/CEF traffic
+and Prowl's default solver context use the same hop; user-facing and CDP WebViews select a
+proxy-bound Prowl context by host rule before navigation. The generated map translates each rule
+name into a stable opaque alias, so proxy credentials and names never enter Server settings:
 
 ```sh
 # app
 SOCKS_PROXY_ENABLED=true SOCKS_PROXY_HOST=egress-hop SOCKS_PROXY_PORT=1080
-# prowl
+# prowl default context
 PROWL_PROXY_URL=socks5://egress-hop:1080
+# named WebViews: PROWL_EGRESS_BOUNDARY=context, PROWL_EGRESSES_FILE=/run/secrets/prowl_egresses
 ```
 
 Credentials live in `secrets/egress-upstreams.json` and the generated hop configuration in
 `secrets/egress-hop.json`; neither belongs in this repository or in `.env`.
 
 Assign a host to an upstream by listing it, one per line, in `egress-rules/<upstream>.txt`
-(wildcards like `*.example.com` are supported), then run `sudo python3 scripts/egress-hop-config.py`
-so the fallback excludes it. That single edit needs only the generator; changing the upstreams
-themselves is the staged cutover below. Two details are easy to get wrong and both were measured:
+(wildcards like `*.example.com` are supported), then rerun the generator with the context-secret
+and route-map flags above so the fallback excludes it. That single edit needs only the generator;
+changing the upstreams themselves is the staged cutover below. Two details are easy to get wrong and both were measured:
 
 - gost spreads requests across every node whose bypass passes, so the fallback carries a blacklist
   of the union of the other egresses' hosts in `egress-rules/<fallback>-exclude.txt`. Without it,
@@ -305,7 +309,10 @@ clearance stay put otherwise. Repairs land in the rule files, which the hop hot-
 List the hosts to watch in `egress-rules/egress-watch.txt`. Hosts already assigned in a rule file
 are watched whether or not they appear there, so an assignment is never left unverified. That file
 is also the place for operator notes: the per-egress rule files are regenerated, so a comment
-written into one of them does not survive.
+written into one of them does not survive. The scheduler samples independent start times
+45–75 minutes apart at the default one-hour center, accounting for probe runtime. If a host's
+exit IP is blocked, `egress-rules/banned-exits.json` can exclude the corresponding upstream before
+any probe; this optional site/IP policy remains private and untracked.
 
 ```sh
 # what it would do, changing nothing
@@ -321,33 +328,35 @@ without its migrate command. The migration carries the exact commands; the steps
 get wrong are:
 
 - stop `egress-prober` *before* editing `secrets/egress-upstreams.json`. It reads that file on its
-  next hourly run and can rewrite the live `egress-rules/` from a half-edited config. The app and
+  next jittered run and can rewrite the live `egress-rules/` from a half-edited config. The app and
   Prowl keep running.
 - stage the rule files with `egress-hop-config.py --rules-local "$STAGE"`, then compare them and
   `secrets/egress-hop.json` against the backups with the migration's `cmp -s` / `diff -rq` pair.
   Those report only whether files differ, never their contents, so the credentials in
   `egress-hop.json` stay off the terminal.
-- copy the accepted rules in, then force-recreate both services so they rebind the new files:
-  `docker compose up -d --force-recreate --no-deps egress-hop egress-prober`. A `restart` reuses the
-  existing container and keeps it bound to the old file, for the bind-mount reason below.
+- copy the accepted rules in, then force-recreate the hop, prober, Prowl and Server so their
+  file bind mounts and proxy-bound contexts pick up the new upstreams; a `restart` retains the
+  old file inode.
 
 #### Migrating from the old Decodo env file
 
 An older deployment read `secrets/decodo.env`. The new `secrets/egress-upstreams.json` is read by
-`egress-prober` on its next hourly run, so stop that service before the migration writes the file:
+`egress-prober` on its next jittered run, so stop that service before the migration writes the file:
 otherwise a run mid-migration rewrites the live `egress-rules/` from the half-migrated config.
 Only `egress-prober` is stopped; the app and Prowl keep running. The migration itself is optional:
 a fresh deployment just authors `secrets/egress-upstreams.json` as above.
 
 ```sh
 cd /opt/suwayomi
-# Stop the prober: it reads secrets/egress-upstreams.json hourly and could rewrite the live
+# Stop the prober: it reads secrets/egress-upstreams.json periodically and could rewrite the live
 # egress-rules mid-check.
 sudo docker compose stop egress-prober
 sudo cp secrets/egress-hop.json secrets/egress-hop.json.bak
 sudo python3 scripts/migrate-egress-upstreams.py    # writes secrets/egress-upstreams.json
 STAGE="$(mktemp -d)" && sudo cp -a egress-rules/. "$STAGE"
-sudo python3 scripts/egress-hop-config.py --rules-local "$STAGE"   # writes secrets/egress-hop.json
+sudo python3 scripts/egress-hop-config.py --rules-local "$STAGE" \
+  --prowl-egresses-out secrets/prowl_egresses --prowl-egresses-uid 10001 \
+  --webview-egress-names-out "$STAGE/webview-egress-names.json"
 sudo cmp -s secrets/egress-hop.json.bak secrets/egress-hop.json \
   && echo "egress-hop.json: unchanged" \
   || echo "egress-hop.json: CHANGED - inspect locally before restarting, do not paste it"
@@ -364,13 +373,13 @@ fallback and leaves `decodo.env` in place. `cmp -s` and `diff -rq` print no file
 `egress-hop.json` carries upstream credentials. A `diff -rq` difference can be a header comment
 only, which is not a routing change; read it before treating it as one.
 
-When both comparisons are acceptable, put the accepted files in place and recreate the two
-services so they rebind the new files:
+When both comparisons are acceptable, put the accepted files in place and recreate all four
+services so they rebind the new files and named proxy contexts:
 
 ```sh
 cd /opt/suwayomi
 sudo cp -a "$STAGE"/. egress-rules/    # skip when egress-rules reported unchanged
-sudo docker compose up -d --force-recreate --no-deps egress-hop egress-prober
+sudo docker compose up -d --force-recreate --no-deps egress-hop egress-prober prowl suwayomi
 sudo rm -rf -- "$STAGE"
 ```
 
@@ -435,12 +444,13 @@ fetch finishes, so between fetches the display shows an empty browser window, an
 then carries the window but not any page. Keeping a tab open for interactive use is the next
 step, not something this surface does by itself.
 
-### Challenge solving (Prowl + WARP)
+### Challenge solving (Prowl)
 
 The app talks to a FlareSolverr-compatible endpoint (`FLARESOLVERR_URL=http://prowl:8191`). Prowl
 is used instead of FlareSolverr/Byparr because it drives a real fingerprint-patched Chromium
-that owns a persistent trust profile and solves a Cloudflare challenge by itself. Its egress is
-fixed by `PROWL_PROXY_URL`, so it must match the app's own proxy for a clearance to be valid.
+that owns a persistent trust profile and attempts to solve Cloudflare challenges. Its default
+context uses `PROWL_PROXY_URL` and must match the app's hop; named WebView contexts instead use
+the corresponding upstream directly, each with a separate cookie jar.
 
 That egress matters: at least one Cloudflare zone answers this host with a hard block page
 (`Attention Required!`) while the same URL through Cloudflare WARP only returns a solvable
@@ -478,15 +488,15 @@ Rollback: set `FLARESOLVERR_URL=http://flaresolverr:8191` and re-add the previou
 
 ### WebView egress
 
-The default `PROWL_VNC` provider opens the browser in Prowl. Both the app's SOCKS setting and
-`PROWL_PROXY_URL` point to `egress-hop:1080`; gost chooses the upstream by destination host.
-Keep both on the same hop: challenge clearances are bound to the exit address. VNC only carries
-the rendered desktop and is not the browser's network proxy.
+The default `PROWL_VNC` provider opens the browser in Prowl. Source HTTP/extension WebViews and
+Prowl's default context use `egress-hop:1080`. Manual WebViews and CDP reservations select the
+named context for the destination's rule assignment, pinning its exit and cookies to that context.
+A persistent context does not share cookies across exits; Suwayomi explicitly seeds/reads them.
+VNC carries only the rendered desktop, not the browser's network proxy.
 
-If `WEB_VIEW_PROVIDER=CEF` is selected instead, embedded Chromium gets its proxy from the
-server's SOCKS setting (`--proxy-server`), not from container `HTTP_PROXY` variables. The host
-override clears those variables; changing `SUWAYOMI_HTTP_PROXY` alone does not route CEF or the
-app's Java HTTP client.
+Extension-created CEF WebViews still initialize under `PROWL_VNC`; CEF gets its proxy from the
+server's SOCKS setting (`--proxy-server`), not from container `HTTP_PROXY` variables. Changing
+`SUWAYOMI_HTTP_PROXY` alone does not route CEF or the app's Java HTTP client.
 
 ### Bundled WebUI
 
@@ -505,11 +515,11 @@ revision the app reports as its WebUI version.
 
 ### KCEF / WebView
 
-The image still bundles KCEF and Xvfb, but `WEB_VIEW_PROVIDER=PROWL_VNC` skips CEF
-initialization even when `server.kcefEnabled = true`. To use CEF, select `CEF` and keep
-`KCEF_ENABLED=true`. It needs a raised `shm_size` (Docker's 64 MiB default can crash the
-renderer) and roughly 0.5 GiB of spare RAM. The external Prowl browser runs in its own
-container instead.
+The image bundles KCEF and Xvfb. With `KCEF_ENABLED=true`, CEF initializes for extension-created
+Android WebViews regardless of `WEB_VIEW_PROVIDER`; `PROWL_VNC` selects Prowl for the user-facing
+WebView only. This uses memory for both browsers (allow roughly 0.5 GiB for CEF), and CEF needs
+a raised `shm_size` (Docker's 64 MiB default can crash the renderer). Set `KCEF_ENABLED=false`
+only if extension WebViews are not needed.
 
 ```sh
 docker compose exec suwayomi sh -lc \

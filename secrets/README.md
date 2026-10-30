@@ -10,11 +10,12 @@ rclone.conf            the archive remote. S3-compatible Backblaze B2, mounted w
 egress-upstreams.json  the named SOCKS5 upstreams the hop routes through, authored from
                        secrets/egress-upstreams.json.example. Holds provider credentials
 egress-hop.json        GENERATED, not authored: run scripts/egress-hop-config.py
+prowl_egresses         GENERATED, private named-context proxies; Prowl uid 10001 owns this file
 ```
 
 `egress-upstreams.json` is a small JSON object. It is read by `scripts/egress-hop-config.py`, which
-turns it into `egress-hop.json` and the rule files, and by `scripts/egress-prober.py`, which probes
-the upstreams it names:
+turns it into `egress-hop.json`, `prowl_egresses`, the private route-name map, and the rule files;
+`scripts/egress-prober.py` probes the upstreams it names:
 
 ```json
 {
@@ -40,16 +41,20 @@ the upstreams it names:
 
 `egress-rules/direct-hosts.txt` is separate policy, edited by hand; the generator only seeds it
 when it is missing, so local edits survive. `egress-rules/<upstream>.txt` and the union file are
-maintained by the prober, which may reassign a host after a probe.
+maintained by the prober, which may reassign a host after a probe. The private
+`egress-rules/webview-egress-names.json` maps upstream names to stable opaque Prowl aliases;
+`egress-rules/banned-exits.json` optionally maps a hostname to banned exit IPs and upstream
+names so the prober skips those exits. All files under `egress-rules/` stay untracked in this
+generic template.
 
 Migrating an existing `decodo.env`: stop `egress-prober` first, because it reads
-`egress-upstreams.json` hourly and can rewrite the live rule files from it. Then run
+`egress-upstreams.json` on its jittered schedule and can rewrite the live rule files from it. Then run
 `scripts/migrate-egress-upstreams.py`, which writes `egress-upstreams.json` with `decodo-1`,
 `decodo-2`, ... and `warp` as the fallback and touches nothing else; run
-`scripts/egress-hop-config.py`; compare the regenerated `egress-hop.json` against a backup with
+`scripts/egress-hop-config.py --prowl-egresses-out secrets/prowl_egresses --prowl-egresses-uid 10001 --webview-egress-names-out egress-rules/webview-egress-names.json`; compare the regenerated `egress-hop.json` against a backup with
 `cmp -s` (which prints no credentials); and only then copy the accepted rules in and recreate both
-services with `docker compose up -d --force-recreate --no-deps egress-hop egress-prober`, so they
-rebind the replaced files. See `docs/DEPLOY.md`.
+services with `docker compose up -d --force-recreate --no-deps egress-hop egress-prober prowl suwayomi`, so they
+rebind the replaced files and named contexts. See `docs/DEPLOY.md`.
 
 Permissions: `chmod 600` on all of them, and `/opt/suwayomi/secrets` is `chmod 700`. The compose
 files materialise these as Compose secrets rather than environment variables, which is why values
